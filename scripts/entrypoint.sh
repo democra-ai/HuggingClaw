@@ -48,6 +48,13 @@ touch /home/node/logs/app.log
 ENTRYPOINT_END=$(date +%s)
 echo "[TIMER] Entrypoint (before sync_hf.py): $((ENTRYPOINT_END - BOOT_START))s"
 
+# ── Inject auto-token into Control UI (must happen at runtime, not build) ────
+INJECT_START=$(date +%s)
+if [ -x /home/node/scripts/inject-token.sh ]; then
+  OPENCLAW_APP_DIR=/app/openclaw bash /home/node/scripts/inject-token.sh
+fi
+echo "[TIMER] Token inject: $(($(date +%s) - INJECT_START))s"
+
 # ── Start OpenClaw via sync_hf.py (don't wait for DNS — it runs in bg) ─────
 echo "[entrypoint] Starting OpenClaw via sync_hf.py..."
 echo "[entrypoint] DNS resolution running in background (PID $DNS_PID), app will use it when ready"
