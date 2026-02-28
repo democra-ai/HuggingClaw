@@ -252,6 +252,14 @@ class OpenClawFullSync:
         default_src = Path(__file__).parent / "openclaw.json.default"
         if default_src.exists():
             shutil.copy2(str(default_src), str(config_path))
+            # Replace placeholder with actual env var value
+            text = config_path.read_text()
+            if "__OPENROUTER_API_KEY__" in text:
+                if OPENROUTER_API_KEY:
+                    text = text.replace("__OPENROUTER_API_KEY__", OPENROUTER_API_KEY)
+                else:
+                    text = text.replace("__OPENROUTER_API_KEY__", "")
+                config_path.write_text(text)
             print("[SYNC] Created openclaw.json from default template")
         else:
             with open(config_path, "w") as f:
@@ -499,10 +507,16 @@ class OpenClawFullSync:
 
 def main():
     try:
+        t_main_start = time.time()
+
+        t0 = time.time()
         sync = OpenClawFullSync()
+        print(f"[TIMER] sync_hf init: {time.time() - t0:.1f}s")
 
         # 1. Restore
+        t0 = time.time()
         sync.load_from_repo()
+        print(f"[TIMER] load_from_repo (restore): {time.time() - t0:.1f}s")
 
         # 2. Background sync
         stop_event = threading.Event()
@@ -510,7 +524,10 @@ def main():
         t.start()
 
         # 3. Start application
+        t0 = time.time()
         process = sync.run_openclaw()
+        print(f"[TIMER] run_openclaw launch: {time.time() - t0:.1f}s")
+        print(f"[TIMER] Total startup (init → app launched): {time.time() - t_main_start:.1f}s")
 
         # Signal handler
         def handle_signal(sig, frame):

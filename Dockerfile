@@ -1,70 +1,82 @@
-# OpenClaw on Hugging Face Spaces — 从源码构建
+# OpenClaw on Hugging Face Spaces — 从源码构建（带计时）
 # 文档: https://huggingface.co/docs/hub/spaces-sdks-docker
 
 FROM node:22-bookworm
+SHELL ["/bin/bash", "-c"]
 
-# Force rebuild - upload_folder persistence v9
-RUN echo "clean-build-v9-upload-folder-$(date +%s)"
+# ── Step 1: System dependencies ──────────────────────────────────────────────
+RUN echo "[build][step1] Installing system deps..." && START=$(date +%s) \
+  && apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl python3 python3-pip \
+  && rm -rf /var/lib/apt/lists/* \
+  && echo "[build][step1] System deps: $(($(date +%s) - START))s"
 
-# 构建依赖（包含 Python3 以便使用 huggingface_hub 做 Dataset 持久化）
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl python3 python3-pip \
-  && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --no-cache-dir --break-system-packages huggingface_hub
+# ── Step 2: Python dependencies ──────────────────────────────────────────────
+RUN echo "[build][step2] Installing huggingface_hub..." && START=$(date +%s) \
+  && pip3 install --no-cache-dir --break-system-packages huggingface_hub \
+  && echo "[build][step2] huggingface_hub: $(($(date +%s) - START))s"
 
-RUN corepack enable
-RUN curl -fsSL https://bun.sh/install | bash
+# ── Step 3: Node tooling ────────────────────────────────────────────────────
+RUN echo "[build][step3] Enabling corepack + bun..." && START=$(date +%s) \
+  && corepack enable \
+  && curl -fsSL https://bun.sh/install | bash \
+  && echo "[build][step3] Corepack + Bun: $(($(date +%s) - START))s"
 ENV PATH="/root/.bun/bin:${PATH}"
 
+# ── Step 4: Clone OpenClaw ───────────────────────────────────────────────────
 WORKDIR /app
-RUN git clone --depth 1 https://github.com/openclaw/openclaw.git openclaw
+RUN echo "[build][step4] Cloning OpenClaw..." && START=$(date +%s) \
+  && git clone --depth 1 https://github.com/openclaw/openclaw.git openclaw \
+  && echo "[build][step4] Git clone: $(($(date +%s) - START))s"
 WORKDIR /app/openclaw
 
-# 补丁：仅在实际成功解析消息 body 并即将投递回复时记录 inbound，
-# 避免解密失败（Bad MAC）的消息被误计为已接收导致 lastInboundAt 有值但无法回复
+# ── Step 5: Apply patches ───────────────────────────────────────────────────
 COPY patches /app/patches
-RUN if [ -f /app/patches/web-inbound-record-activity-after-body.patch ]; then patch -p1 < /app/patches/web-inbound-record-activity-after-body.patch; fi
+RUN echo "[build][step5] Applying patches..." && START=$(date +%s) \
+  && if [ -f /app/patches/web-inbound-record-activity-after-body.patch ]; then \
+       patch -p1 < /app/patches/web-inbound-record-activity-after-body.patch; \
+     fi \
+  && echo "[build][step5] Patches: $(($(date +%s) - START))s"
 
-RUN pnpm install --frozen-lockfile
-RUN pnpm build
+# ── Step 6: pnpm install ────────────────────────────────────────────────────
+RUN echo "[build][step6] pnpm install..." && START=$(date +%s) \
+  && pnpm install --frozen-lockfile \
+  && echo "[build][step6] pnpm install: $(($(date +%s) - START))s"
+
+# ── Step 7: pnpm build ──────────────────────────────────────────────────────
+RUN echo "[build][step7] pnpm build..." && START=$(date +%s) \
+  && pnpm build \
+  && echo "[build][step7] pnpm build: $(($(date +%s) - START))s"
+
+# ── Step 8: pnpm ui:build ───────────────────────────────────────────────────
 ENV OPENCLAW_PREFER_PNPM=1
-RUN pnpm ui:build
+RUN echo "[build][step8] pnpm ui:build..." && START=$(date +%s) \
+  && pnpm ui:build \
+  && echo "[build][step8] pnpm ui:build: $(($(date +%s) - START))s"
 
-# 验证构建产物完整（包含 Telegram 和 WhatsApp 扩展）
-RUN test -f dist/entry.js && echo "[build-check] dist/entry.js OK" \
- && test -f dist/plugin-sdk/index.js && echo "[build-check] dist/plugin-sdk/index.js OK" \
- && test -d extensions/telegram && echo "[build-check] extensions/telegram OK" \
- && test -d extensions/whatsapp && echo "[build-check] extensions/whatsapp OK" \
- && test -d dist/control-ui && echo "[build-check] dist/control-ui OK"
+# ── Step 9: Verify build artifacts ──────────────────────────────────────────
+RUN echo "[build][step9] Verifying build artifacts..." \
+  && test -f dist/entry.js && echo "  OK dist/entry.js" \
+  && test -f dist/plugin-sdk/index.js && echo "  OK dist/plugin-sdk/index.js" \
+  && test -d extensions/telegram && echo "  OK extensions/telegram" \
+  && test -d extensions/whatsapp && echo "  OK extensions/whatsapp" \
+  && test -d dist/control-ui && echo "  OK dist/control-ui"
 
-# 向 Control UI 注入自动 token 配置（让浏览器自动连接，无需手动输入 token）
-RUN python3 << 'PYEOF'
-import pathlib
-p = pathlib.Path('dist/control-ui/index.html')
-script = '<script>!function(){var K="openclaw.control.settings.v1";try{var s=JSON.parse(localStorage.getItem(K)||"{}")||{};if(!s.token){s.token="openclaw-space-default";localStorage.setItem(K,JSON.stringify(s))}}catch(e){}}()</script>'
-h = p.read_text()
-p.write_text(h.replace('</head>', script + '</head>'))
-print('[build-check] Token auto-config injected into Control UI')
-PYEOF
+# ── Step 10: Inject auto-token into Control UI ──────────────────────────────
+COPY --chown=node:node scripts /home/node/scripts
+RUN chmod +x /home/node/scripts/inject-token.sh && bash /home/node/scripts/inject-token.sh
 
-# 不修改内部代码，改用外部 WebSocket 监护脚本处理 515 重连
-
+# ── Step 11: Final setup ────────────────────────────────────────────────────
 ENV NODE_ENV=production
-# 禁用 bundled 插件发现（改由 global symlink 提供）；用空目录替代 /dev/null 避免 ENOTDIR 警告
 RUN mkdir -p /app/openclaw/empty-bundled-plugins
 ENV OPENCLAW_BUNDLED_PLUGINS_DIR=/app/openclaw/empty-bundled-plugins
 RUN chown -R node:node /app
 
-# 创建 ~/.openclaw 目录结构
 RUN mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/credentials
-# Note: openclaw.json is NOT copied here - it will be restored from Dataset by openclaw_sync.py
-# The new persistence system backs up and restores the entire ~/.openclaw directory
 
-# 持久化脚本（完整目录备份） & DNS 修复
-COPY --chown=node:node scripts /home/node/scripts
 COPY --chown=node:node openclaw.json /home/node/scripts/openclaw.json.default
-RUN chmod +x /home/node/scripts/entrypoint.sh
-RUN chmod +x /home/node/scripts/sync_hf.py
-RUN chown -R node:node /home/node
+RUN chmod +x /home/node/scripts/entrypoint.sh \
+  && chmod +x /home/node/scripts/sync_hf.py \
+  && chown -R node:node /home/node
 
 USER node
 ENV HOME=/home/node

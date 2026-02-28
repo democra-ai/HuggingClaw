@@ -22,7 +22,7 @@
     "providers": {
       "openrouter": {
         "baseUrl": "https://openrouter.ai/api/v1",
-        "apiKey": "${OPENROUTER_API_KEY}",
+        "apiKey": "__OPENROUTER_API_KEY__",
         "api": "openai-completions",
         "models": [
           {
