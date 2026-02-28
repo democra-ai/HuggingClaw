@@ -16,13 +16,14 @@ DNS_START=$(date +%s)
 ) &
 DNS_PID=$!
 
-# ── Node.js memory limit ──────────────────────────────────────────────────
-NODE_MEMORY_LIMIT="${NODE_MEMORY_LIMIT:-512}"
-export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=$NODE_MEMORY_LIMIT"
-echo "[entrypoint] Node.js memory limit: ${NODE_MEMORY_LIMIT}MB"
+# ── Node.js memory limit (only if explicitly set) ─────────────────────────
+if [ -n "$NODE_MEMORY_LIMIT" ]; then
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=$NODE_MEMORY_LIMIT"
+  echo "[entrypoint] Node.js memory limit: ${NODE_MEMORY_LIMIT}MB"
+fi
 
 # Enable Node.js DNS fix (will use resolved file when ready)
-export NODE_OPTIONS="${NODE_OPTIONS} --require /home/node/scripts/dns-fix.cjs"
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/scripts/dns-fix.cjs"
 
 # ── Extensions symlink ──────────────────────────────────────────────────────
 SYMLINK_START=$(date +%s)
