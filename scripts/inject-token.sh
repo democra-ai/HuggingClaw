@@ -11,7 +11,9 @@ if [ ! -f "$INDEX_HTML" ]; then
 fi
 
 # Create the injection script
-INJECT_SCRIPT="<script>!function(){var K='openclaw.control.settings.v1';try{var s=JSON.parse(localStorage.getItem(K)||'{}');s.token='${TOKEN}';localStorage.setItem(K,JSON.stringify(s))}catch(e){}}()</script>"
+# 1. Set window.__OPENCLAW_AUTH_TOKEN__ — always works (even when localStorage is blocked in iframe/incognito)
+# 2. Also try localStorage as a fallback for the original UI code path
+INJECT_SCRIPT="<script>window.__OPENCLAW_AUTH_TOKEN__='${TOKEN}';try{var K='openclaw.control.settings.v1',s=JSON.parse(localStorage.getItem(K)||'{}');s.token='${TOKEN}';localStorage.setItem(K,JSON.stringify(s))}catch(e){}</script>"
 
 # Use python3 for reliable string replacement (avoids sed delimiter issues)
 python3 -c "
@@ -20,7 +22,7 @@ f = '${INDEX_HTML}'
 with open(f, 'r') as fh:
     html = fh.read()
 inject = '''${INJECT_SCRIPT}'''
-if '</head>' in html and inject not in html:
+if '</head>' in html and '__OPENCLAW_AUTH_TOKEN__' not in html:
     html = html.replace('</head>', inject + '</head>')
     with open(f, 'w') as fh:
         fh.write(html)

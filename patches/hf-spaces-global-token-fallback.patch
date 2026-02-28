@@ -1,0 +1,37 @@
+diff --git a/ui/src/ui/storage.ts b/ui/src/ui/storage.ts
+index b32e6c3..763a543 100644
+--- a/ui/src/ui/storage.ts
++++ b/ui/src/ui/storage.ts
+@@ -17,6 +17,14 @@ export type UiSettings = {
+   locale?: string;
+ };
+ 
++// Read an injected auth token from a global variable.
++// Used by HF Spaces where localStorage may be unavailable
++// (e.g. third-party iframe in incognito mode).
++function getInjectedToken(): string {
++  const w = globalThis as Record<string, unknown>;
++  return typeof w.__OPENCLAW_AUTH_TOKEN__ === "string" ? (w.__OPENCLAW_AUTH_TOKEN__ as string) : "";
++}
++
+ export function loadSettings(): UiSettings {
+   const defaultUrl = (() => {
+     const proto = location.protocol === "https:" ? "wss" : "ws";
+@@ -25,7 +33,7 @@ export function loadSettings(): UiSettings {
+ 
+   const defaults: UiSettings = {
+     gatewayUrl: defaultUrl,
+-    token: "",
++    token: getInjectedToken(),
+     sessionKey: "main",
+     lastActiveSessionKey: "main",
+     theme: "system",
+@@ -47,7 +55,7 @@ export function loadSettings(): UiSettings {
+         typeof parsed.gatewayUrl === "string" && parsed.gatewayUrl.trim()
+           ? parsed.gatewayUrl.trim()
+           : defaults.gatewayUrl,
+-      token: typeof parsed.token === "string" ? parsed.token : defaults.token,
++      token: typeof parsed.token === "string" && parsed.token ? parsed.token : defaults.token,
+       sessionKey:
+         typeof parsed.sessionKey === "string" && parsed.sessionKey.trim()
+           ? parsed.sessionKey.trim()
