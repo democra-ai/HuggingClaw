@@ -9,6 +9,9 @@ license: mit
 short_description: Deploy OpenClaw on HuggingFace Spaces
 app_port: 7860
 tags:
+  - huggingface
+  - huggingface-dataset
+  - openrouter
   - chatbot
   - llm
   - openclaw
