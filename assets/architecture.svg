@@ -1,148 +1,110 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 480" font-family="'Segoe UI',system-ui,-apple-system,sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 380" font-family="'SF Pro Display','SF Pro','Helvetica Neue',system-ui,-apple-system,sans-serif">
   <defs>
-    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#1a0a00"/>
-      <stop offset="100%" stop-color="#160500"/>
+    <linearGradient id="titleBar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3a3a3c"/>
+      <stop offset="100%" stop-color="#2c2c2e"/>
+    </linearGradient>
+    <linearGradient id="winBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1c1c1e"/>
+      <stop offset="100%" stop-color="#161618"/>
     </linearGradient>
     <linearGradient id="redGrad" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#ef0011"/>
       <stop offset="100%" stop-color="#ba000d"/>
     </linearGradient>
-    <linearGradient id="yellowGrad" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#fbbf24"/>
-      <stop offset="100%" stop-color="#f59e0b"/>
-    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
     <filter id="glow">
       <feGaussianBlur stdDeviation="2" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M0,0 L10,5 L0,10 z" fill="#ef0011"/>
-    </marker>
-    <marker id="arrowYellow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
-    </marker>
-    <marker id="arrowOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M0,0 L10,5 L0,10 z" fill="#fb923c"/>
-    </marker>
     <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M0,0 L10,5 L0,10 z" fill="#4ade80"/>
+      <path d="M0,0 L10,5 L0,10 z" fill="#30d158"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64d2ff"/>
     </marker>
   </defs>
 
-  <!-- Background -->
-  <rect width="860" height="480" rx="16" fill="url(#bgGrad)"/>
+  <!-- ══ macOS Window ══ -->
+  <g filter="url(#shadow)">
+    <rect x="20" y="20" width="640" height="340" rx="12" fill="url(#winBg)"/>
+  </g>
+  <!-- Window border -->
+  <rect x="20" y="20" width="640" height="340" rx="12" fill="none" stroke="#3a3a3c" stroke-width="0.5"/>
+
+  <!-- Title bar -->
+  <rect x="20" y="20" width="640" height="36" rx="12" fill="url(#titleBar)"/>
+  <rect x="20" y="44" width="640" height="12" fill="url(#titleBar)"/>
+  <!-- Traffic lights -->
+  <circle cx="44" cy="38" r="6" fill="#ff5f57"/>
+  <circle cx="64" cy="38" r="6" fill="#febc2e"/>
+  <circle cx="84" cy="38" r="6" fill="#28c840"/>
+  <!-- Window title -->
+  <text x="340" y="43" text-anchor="middle" fill="#98989d" font-size="13" font-weight="500">HuggingClaw — HuggingFace Space</text>
 
   <!-- ═══════════════════════════════════════════════════════ -->
-  <!-- CHANNELS (top row)                                     -->
+  <!-- OpenClaw Engine                                        -->
   <!-- ═══════════════════════════════════════════════════════ -->
 
-  <text x="430" y="30" text-anchor="middle" fill="#a3842c" font-size="11" font-weight="600" letter-spacing="2">CHANNELS</text>
-
-  <!-- Channel boxes -->
-  <rect x="30" y="42" width="100" height="46" rx="8" fill="#1e1208" stroke="#5c3c10" stroke-width="1"/>
-  <text x="80" y="62" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">Web UI</text>
-  <text x="80" y="78" text-anchor="middle" fill="#8b7020" font-size="9">Control Panel</text>
-
-  <rect x="140" y="42" width="100" height="46" rx="8" fill="#1e1208" stroke="#5c3c10" stroke-width="1"/>
-  <text x="190" y="62" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">Telegram</text>
-  <text x="190" y="78" text-anchor="middle" fill="#8b7020" font-size="9">Bot</text>
-
-  <rect x="250" y="42" width="100" height="46" rx="8" fill="#1e1208" stroke="#5c3c10" stroke-width="1"/>
-  <text x="300" y="62" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">WhatsApp</text>
-  <text x="300" y="78" text-anchor="middle" fill="#8b7020" font-size="9">Messaging</text>
-
-  <rect x="360" y="42" width="100" height="46" rx="8" fill="#1e1208" stroke="#5c3c10" stroke-width="1"/>
-  <text x="410" y="62" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">Discord</text>
-  <text x="410" y="78" text-anchor="middle" fill="#8b7020" font-size="9">Server Bot</text>
-
-  <rect x="470" y="42" width="100" height="46" rx="8" fill="#1e1208" stroke="#5c3c10" stroke-width="1"/>
-  <text x="520" y="62" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">Slack</text>
-  <text x="520" y="78" text-anchor="middle" fill="#8b7020" font-size="9">Workspace</text>
-
-  <rect x="580" y="42" width="100" height="46" rx="8" fill="#1e1208" stroke="#5c3c10" stroke-width="1"/>
-  <text x="630" y="62" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">Signal</text>
-  <text x="630" y="78" text-anchor="middle" fill="#8b7020" font-size="9">Private Chat</text>
-
-  <rect x="690" y="42" width="140" height="46" rx="8" fill="#1e1208" stroke="#5c3c10" stroke-width="1"/>
-  <text x="760" y="62" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">LINE · iMessage</text>
-  <text x="760" y="78" text-anchor="middle" fill="#8b7020" font-size="9">Matrix · IRC · 40+</text>
-
-  <!-- Arrows from channels down -->
-  <line x1="80" y1="88" x2="80" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <line x1="190" y1="88" x2="190" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <line x1="300" y1="88" x2="300" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <line x1="410" y1="88" x2="410" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <line x1="520" y1="88" x2="520" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <line x1="630" y1="88" x2="630" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <line x1="760" y1="88" x2="760" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <!-- Horizontal connector -->
-  <line x1="80" y1="118" x2="760" y2="118" stroke="#5c3c10" stroke-width="1" opacity="0.4"/>
-  <!-- Single arrow down from center -->
-  <line x1="430" y1="118" x2="430" y2="145" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arrowYellow)" filter="url(#glow)"/>
-
-  <!-- ═══════════════════════════════════════════════════════ -->
-  <!-- HUGGINGFACE SPACE (center boundary)                    -->
-  <!-- ═══════════════════════════════════════════════════════ -->
-
-  <rect x="110" y="150" width="640" height="155" rx="14" fill="none" stroke="#fbbf24" stroke-width="1.8" stroke-dasharray="8,5" opacity="0.5"/>
-  <!-- HF badge -->
-  <circle cx="140" cy="167" r="10" fill="#fbbf24" opacity="0.15"/>
-  <text x="140" y="171" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700">HF</text>
-  <text x="165" y="171" fill="#fbbf24" font-size="12" font-weight="600" letter-spacing="1" opacity="0.9">HUGGINGFACE SPACE</text>
-
-  <!-- OpenClaw Engine (large red box inside HF Space) -->
-  <rect x="140" y="185" width="580" height="100" rx="10" fill="#1a0505" stroke="#ef0011" stroke-width="1.5" opacity="0.95"/>
-  <rect x="150" y="185" width="560" height="3" rx="1.5" fill="url(#redGrad)" opacity="0.5"/>
+  <rect x="50" y="76" width="580" height="120" rx="10" fill="#1a0505" stroke="#ef0011" stroke-width="1.2" opacity="0.95"/>
+  <rect x="60" y="76" width="560" height="2.5" rx="1.2" fill="url(#redGrad)" opacity="0.6"/>
 
   <!-- Engine title -->
-  <text x="430" y="212" text-anchor="middle" fill="#ef0011" font-size="16" font-weight="700">OpenClaw Engine</text>
-  <text x="430" y="228" text-anchor="middle" fill="#8b3030" font-size="10" opacity="0.7">AI Assistant Platform · Node.js</text>
+  <text x="340" y="106" text-anchor="middle" fill="#ef0011" font-size="18" font-weight="700">OpenClaw Engine</text>
+  <text x="340" y="124" text-anchor="middle" fill="#6b2020" font-size="10">AI Assistant Platform · Node.js</text>
 
-  <!-- Feature pills inside engine -->
-  <rect x="160" y="240" width="108" height="30" rx="15" fill="url(#redGrad)" opacity="0.25" stroke="#ef0011" stroke-width="0.6" stroke-opacity="0.3"/>
-  <text x="214" y="259" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Agent Workflows</text>
+  <!-- Feature pills -->
+  <rect x="68" y="140" width="108" height="30" rx="15" fill="url(#redGrad)" opacity="0.2" stroke="#ef0011" stroke-width="0.5" stroke-opacity="0.3"/>
+  <text x="122" y="159" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Agent Workflows</text>
 
-  <rect x="280" y="240" width="108" height="30" rx="15" fill="url(#redGrad)" opacity="0.25" stroke="#ef0011" stroke-width="0.6" stroke-opacity="0.3"/>
-  <text x="334" y="259" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Conversations</text>
+  <rect x="188" y="140" width="108" height="30" rx="15" fill="url(#redGrad)" opacity="0.2" stroke="#ef0011" stroke-width="0.5" stroke-opacity="0.3"/>
+  <text x="242" y="159" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Conversations</text>
 
-  <rect x="400" y="240" width="108" height="30" rx="15" fill="url(#redGrad)" opacity="0.25" stroke="#ef0011" stroke-width="0.6" stroke-opacity="0.3"/>
-  <text x="454" y="259" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Plugin System</text>
+  <rect x="308" y="140" width="108" height="30" rx="15" fill="url(#redGrad)" opacity="0.2" stroke="#ef0011" stroke-width="0.5" stroke-opacity="0.3"/>
+  <text x="362" y="159" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Plugin System</text>
 
-  <rect x="520" y="240" width="108" height="30" rx="15" fill="url(#redGrad)" opacity="0.25" stroke="#ef0011" stroke-width="0.6" stroke-opacity="0.3"/>
-  <text x="574" y="259" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Memory</text>
+  <rect x="428" y="140" width="90" height="30" rx="15" fill="url(#redGrad)" opacity="0.2" stroke="#ef0011" stroke-width="0.5" stroke-opacity="0.3"/>
+  <text x="473" y="159" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">Memory</text>
 
-  <rect x="640" y="240" width="66" height="30" rx="15" fill="url(#redGrad)" opacity="0.15"/>
-  <text x="673" y="259" text-anchor="middle" fill="#b91c1c" font-size="10">+ more</text>
+  <rect x="530" y="140" width="86" height="30" rx="15" fill="url(#redGrad)" opacity="0.12"/>
+  <text x="573" y="159" text-anchor="middle" fill="#7f1d1d" font-size="10">40+ more</text>
 
   <!-- ═══════════════════════════════════════════════════════ -->
-  <!-- BACKEND SERVICES (bottom row)                           -->
+  <!-- Arrows down                                            -->
   <!-- ═══════════════════════════════════════════════════════ -->
 
-  <!-- Arrows down from Engine -->
-  <line x1="300" y1="290" x2="300" y2="325" stroke="#4ade80" stroke-width="2" marker-end="url(#arrowGreen)" filter="url(#glow)"/>
-  <line x1="560" y1="290" x2="560" y2="325" stroke="#fb923c" stroke-width="2" marker-end="url(#arrowOrange)" filter="url(#glow)"/>
+  <line x1="220" y1="200" x2="220" y2="238" stroke="#30d158" stroke-width="2" marker-end="url(#arrowGreen)" filter="url(#glow)"/>
+  <line x1="460" y1="200" x2="460" y2="238" stroke="#64d2ff" stroke-width="2" marker-end="url(#arrowBlue)" filter="url(#glow)"/>
 
-  <!-- HF Dataset -->
-  <rect x="175" y="330" width="250" height="75" rx="12" fill="#1a1200" stroke="#fbbf24" stroke-width="1.5"/>
-  <text x="220" y="357" fill="#fbbf24" font-size="14" font-weight="700">HF Dataset</text>
-  <text x="220" y="375" fill="#a3842c" font-size="10">Private Repo</text>
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- HF Dataset (left)                                      -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <rect x="50" y="244" width="270" height="90" rx="10" fill="#1a1a0a" stroke="#fbbf24" stroke-width="1.2"/>
+  <!-- HF icon -->
+  <circle cx="78" cy="268" r="12" fill="#fbbf24" opacity="0.12"/>
+  <text x="78" y="272" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700">HF</text>
+  <text x="100" y="272" fill="#fbbf24" font-size="14" font-weight="700">Dataset</text>
+  <text x="100" y="289" fill="#7a6520" font-size="10">Private Repo · Persistent Backup</text>
   <!-- Sync badge -->
-  <rect x="325" y="343" width="80" height="26" rx="13" fill="#052e16" stroke="#22c55e" stroke-width="1" opacity="0.9"/>
-  <text x="365" y="360" text-anchor="middle" fill="#4ade80" font-size="10" font-weight="600">Auto-Sync</text>
-  <text x="300" y="393" text-anchor="middle" fill="#78350f" font-size="9">Conversations · Settings · Credentials</text>
+  <rect x="100" y="300" width="80" height="22" rx="11" fill="#0a2618" stroke="#30d158" stroke-width="0.8"/>
+  <text x="140" y="315" text-anchor="middle" fill="#30d158" font-size="9" font-weight="600">Auto-Sync</text>
+  <text x="200" y="315" fill="#5c4a10" font-size="9">Conversations · Settings</text>
 
-  <!-- LLM Provider -->
-  <rect x="435" y="330" width="250" height="75" rx="12" fill="#1c0f08" stroke="#fb923c" stroke-width="1.5"/>
-  <text x="480" y="357" fill="#fdba74" font-size="14" font-weight="700">LLM Provider</text>
-  <text x="480" y="375" fill="#c2723c" font-size="10">OpenRouter</text>
-  <!-- Model badge -->
-  <rect x="582" y="343" width="84" height="26" rx="13" fill="#7c2d12" opacity="0.6"/>
-  <text x="624" y="360" text-anchor="middle" fill="#fb923c" font-size="10" font-weight="600">200+ Models</text>
-  <text x="560" y="393" text-anchor="middle" fill="#7c2d12" font-size="9">DeepSeek · Step · GPT · Claude · Gemini</text>
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- DNS Resolver (right)                                   -->
+  <!-- ═══════════════════════════════════════════════════════ -->
 
-  <!-- Footer -->
-  <text x="430" y="445" text-anchor="middle" fill="#5c3c10" font-size="10" letter-spacing="1.5">
-    ZERO HARDWARE  ·  ALWAYS ONLINE  ·  AUTO-PERSISTENT  ·  HTTPS BUILT-IN  ·  ONE-CLICK DEPLOY
-  </text>
+  <rect x="360" y="244" width="270" height="90" rx="10" fill="#0a1520" stroke="#64d2ff" stroke-width="1.2"/>
+  <!-- DNS icon -->
+  <circle cx="388" cy="268" r="12" fill="#64d2ff" opacity="0.12"/>
+  <text x="388" y="273" text-anchor="middle" fill="#64d2ff" font-size="10" font-weight="700">DNS</text>
+  <text x="410" y="272" fill="#64d2ff" font-size="14" font-weight="700">Resolver</text>
+  <text x="410" y="289" fill="#2a5a7a" font-size="10">Async DNS · Background Worker</text>
+  <!-- Script badge -->
+  <rect x="410" y="300" width="96" height="22" rx="11" fill="#0a1828" stroke="#64d2ff" stroke-width="0.8"/>
+  <text x="458" y="315" text-anchor="middle" fill="#64d2ff" font-size="9" font-weight="600">dns-resolve.py</text>
+  <text x="524" y="315" fill="#1a3a5a" font-size="9">HF Spaces Fix</text>
 </svg>
