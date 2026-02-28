@@ -38,6 +38,7 @@
     }
   },
   "plugins": {
+    "allow": ["telegram", "whatsapp"],
     "entries": {
       "telegram": {
         "enabled": true

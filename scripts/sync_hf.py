@@ -351,8 +351,9 @@ class OpenClawFullSync:
             data["models"]["providers"].pop("gemini", None)
             data["agents"]["defaults"]["model"]["primary"] = "openrouter/stepfun/step-3.5-flash:free"
 
-            # Telegram plugin
+            # Plugin whitelist (only load telegram + whatsapp to speed up startup)
             data.setdefault("plugins", {}).setdefault("entries", {})
+            data["plugins"]["allow"] = ["telegram", "whatsapp"]
             if "telegram" not in data["plugins"]["entries"]:
                 data["plugins"]["entries"]["telegram"] = {"enabled": True}
             elif isinstance(data["plugins"]["entries"]["telegram"], dict):
