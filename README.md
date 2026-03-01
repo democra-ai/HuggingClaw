@@ -85,7 +85,7 @@ Go to **Settings → Repository secrets** and configure:
 | `OPENROUTER_API_KEY` | Optional | [OpenRouter](https://openrouter.ai) API key (200+ models, free tier) |
 | `ANTHROPIC_API_KEY` | Optional | Anthropic Claude API key |
 | `GOOGLE_API_KEY` | Optional | Google / Gemini API key |
-| `OPENCLAW_DEFAULT_MODEL` | Optional | Default model, e.g. `openai/gpt-4o-mini` or `openrouter/deepseek/deepseek-chat:free` |
+| `OPENCLAW_DEFAULT_MODEL` | Optional | Default model, e.g. `openrouter/openai/gpt-oss-20b:free` or `openai/gpt-4o-mini` |
 
 > For the full list of environment variables, see [`.env.example`](.env.example).
 
