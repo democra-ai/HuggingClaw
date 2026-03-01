@@ -342,9 +342,9 @@ class OpenClawFullSync:
             try:
                 with open(config_path, "r") as f:
                     cfg = json.load(f)
-                # Remove auth block (no password/token — device auth only)
+                # Ensure default token
                 if "gateway" in cfg:
-                    cfg["gateway"].pop("auth", None)
+                    cfg["gateway"]["auth"] = {"token": "huggingclaw"}
                 if OPENAI_API_KEY and "models" in cfg and "providers" in cfg["models"] and "openai" in cfg["models"]["providers"]:
                     cfg["models"]["providers"]["openai"]["apiKey"] = OPENAI_API_KEY
                     if OPENAI_BASE_URL:
@@ -427,13 +427,14 @@ class OpenClawFullSync:
                 "mode": "local",
                 "bind": "lan",
                 "port": 7860,
+                "auth": {"token": "huggingclaw"},
                 "trustedProxies": ["0.0.0.0/0"],
                 "controlUi": {
                     "allowInsecureAuth": True,
                     "allowedOrigins": allowed_origins
                 }
             }
-            print(f"[SYNC] Set gateway config (auth=device-only, origins={len(allowed_origins)})")
+            print(f"[SYNC] Set gateway config (auth=token:huggingclaw, origins={len(allowed_origins)})")
 
             # Ensure agents defaults
             data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
