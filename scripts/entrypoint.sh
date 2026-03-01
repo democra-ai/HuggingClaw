@@ -6,15 +6,12 @@ BOOT_START=$(date +%s)
 echo "[entrypoint] OpenClaw HuggingFace Spaces Entrypoint"
 echo "[entrypoint] ======================================="
 
-# ── DNS pre-resolution (run in BACKGROUND — was 121s blocking) ──────────────
-echo "[entrypoint] Resolving WhatsApp & Telegram domains via DNS-over-HTTPS (background)..."
+# ── DNS pre-resolution (BLOCKING — needed before app starts) ──────────────
+echo "[entrypoint] Resolving WhatsApp & Telegram domains via DNS-over-HTTPS..."
 DNS_START=$(date +%s)
-(
-  python3 /home/node/scripts/dns-resolve.py /tmp/dns-resolved.json 2>&1
-  DNS_END=$(date +%s)
-  echo "[TIMER] DNS pre-resolve (background): $((DNS_END - DNS_START))s"
-) &
-DNS_PID=$!
+python3 /home/node/scripts/dns-resolve.py /tmp/dns-resolved.json 2>&1
+DNS_END=$(date +%s)
+echo "[TIMER] DNS pre-resolve: $((DNS_END - DNS_START))s"
 
 # ── Node.js memory limit (only if explicitly set) ─────────────────────────
 if [ -n "$NODE_MEMORY_LIMIT" ]; then
@@ -60,7 +57,6 @@ if [ -f /app/openclaw/.version ]; then
   echo "[entrypoint] OpenClaw version: $OPENCLAW_VERSION"
 fi
 
-# ── Start OpenClaw via sync_hf.py (don't wait for DNS — it runs in bg) ─────
+# ── Start OpenClaw via sync_hf.py ─────────────────────────────────────────
 echo "[entrypoint] Starting OpenClaw via sync_hf.py..."
-echo "[entrypoint] DNS resolution running in background (PID $DNS_PID), app will use it when ready"
 exec python3 -u /home/node/scripts/sync_hf.py

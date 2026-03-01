@@ -14,7 +14,6 @@ RUN echo "[build][layer1] System deps + tools..." && START=$(date +%s) \
   && chown node:node /app \
   && mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/credentials \
   && chown -R node:node /home/node \
-  && chmod 666 /etc/hosts \
   && echo "[build][layer1] System deps + tools: $(($(date +%s) - START))s"
 
 # ── 切换到 node 用户（后续所有操作都以 node 身份，无需 chown）───────────────
