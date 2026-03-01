@@ -49,21 +49,9 @@ tags:
 
 ## Why HuggingClaw?
 
-[OpenClaw](https://github.com/openclaw/openclaw) is a powerful self-hosted AI assistant platform supporting Telegram, WhatsApp, and 40+ messaging channels. But running it requires a server — and not everyone has a Mac Mini or spare hardware sitting around.
+[OpenClaw](https://github.com/openclaw/openclaw) is a powerful, popular AI assistant (Telegram, WhatsApp, 40+ channels), but it’s meant to run on your own machine (e.g. a Mac Mini). Not everyone has that. You can deploy on the cloud, but most providers either charge by the hour or offer only very limited resources. **HuggingFace Spaces** gives you 2 vCPU and **16 GB RAM** for free — a good fit for OpenClaw, but Spaces have two problems we fix.
 
-Cloud hosting is an option, but most providers charge by the hour, and OpenClaw's Node.js runtime needs real resources (it runs comfortably at ~16 GB RAM). That rules out most free tiers.
-
-**HuggingFace Spaces** offers the perfect fit: free CPU instances with 2 vCPU and 16 GB RAM, always-on HTTPS, and zero maintenance. There's just one catch — Space containers are **ephemeral**. Every restart wipes your data.
-
-**HuggingClaw** solves this by using a private **HuggingFace Dataset** repo as persistent storage. Your conversations, credentials, and settings are automatically synced on a schedule, and restored on every cold start. You get all the benefits of free cloud hosting with none of the data loss.
-
-| Feature | Detail |
-|---------|--------|
-| **Free compute** | Runs on HF's free CPU tier (2 vCPU, 16 GB RAM) |
-| **Always online** | No need to keep your computer running |
-| **Auto-persistent** | Syncs data to a private HF Dataset repo on schedule |
-| **HTTPS built-in** | Secure WebSocket connections out of the box |
-| **One-click deploy** | Fork → set secrets → done |
+**HuggingClaw** is this repo. It fixes two Hugging Face Space issues: **(1) Data is not persistent** — we use a private **HuggingFace Dataset** to sync and restore your conversations, settings, and credentials so they survive restarts; **(2) DNS resolution fails** for some domains (e.g. WhatsApp) — we fix it with DNS-over-HTTPS and a Node.js DNS patch so OpenClaw can connect reliably.
 
 ## Architecture
 
