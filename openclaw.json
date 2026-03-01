@@ -26,12 +26,12 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "deepseek/deepseek-chat:free",
-            "name": "DeepSeek V3 (Free)"
+            "id": "openai/gpt-oss-20b:free",
+            "name": "GPT-OSS-20B (Free)"
           },
           {
-            "id": "stepfun/step-3.5-flash:free",
-            "name": "Step-3.5-Flash (Free)"
+            "id": "deepseek/deepseek-chat:free",
+            "name": "DeepSeek V3 (Free)"
           }
         ]
       }
@@ -52,7 +52,7 @@
     "defaults": {
       "workspace": "~/.openclaw/workspace",
       "model": {
-        "primary": "openrouter/deepseek/deepseek-chat:free"
+        "primary": "openrouter/openai/gpt-oss-20b:free"
       }
     }
   }
