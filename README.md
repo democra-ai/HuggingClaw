@@ -113,12 +113,8 @@ Fine-tune persistence and performance. Set these as **Repository Secrets** in HF
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GATEWAY_TOKEN` | `huggingclaw` | **Gateway token for Control UI access.** Override to set a custom token. |
-| `AUTO_CREATE_DATASET` | `false` | **Auto-create the Dataset repo.** Default is `false` for security. Set to `true` to let HuggingClaw automatically create a **private** Dataset repo on first startup (and auto-derive the repo name from your `HF_TOKEN` if `OPENCLAW_DATASET_REPO` is not set). Accepted values: `true`, `1`, `yes` / `false`, `0`, `no`. |
-| `SYNC_INTERVAL` | `60` | **Backup interval in seconds.** How often HuggingClaw syncs `~/.openclaw` to the Dataset repo. Lower = safer but more API calls. Recommended: `60`–`300`. |
-| `NODE_MEMORY_LIMIT` | `512` | **Node.js heap memory limit in MB.** HF free tier provides 16 GB RAM; 512 MB is enough for most cases. Increase for complex agent workflows. |
-| `TELEGRAM_BOT_TOKEN` | — | **Telegram bot token.** If set, HuggingClaw auto-probes Telegram API endpoints at startup and selects a working one (HF Spaces blocks `api.telegram.org`). You can also configure the bot token in the Control UI. |
-| `TELEGRAM_API_BASE` | — | **Force a specific Telegram API base URL.** Skips auto-probe. Example: `https://telegram-api.mykdigi.com`. Only needed if auto-probe doesn't find a working endpoint. |
-| `TZ` | `UTC` | **Timezone** for log timestamps. Example: `Asia/Shanghai`, `America/New_York`. |
+| `AUTO_CREATE_DATASET` | `false` | **Auto-create the Dataset repo.** Set to `true` to auto-create a private Dataset repo on first startup. |
+| `SYNC_INTERVAL` | `60` | **Backup interval in seconds.** How often data syncs to the Dataset repo. |
 
 > For the full list (including `OPENAI_BASE_URL`, `OLLAMA_HOST`, proxy settings, etc.), see [`.env.example`](.env.example).
 
