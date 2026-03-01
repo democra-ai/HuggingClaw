@@ -65,8 +65,8 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 # OpenRouter API key (optional; alternative to OPENAI_API_KEY + OPENAI_BASE_URL)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Gateway token (default: huggingclaw; override via GATEWAY_TOKEN env var)
-GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "huggingclaw")
+# Gateway token (optional; if not set, Control UI connects without auth)
+GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "")
 
 # Default model for new conversations (infer from provider if not set)
 OPENCLAW_DEFAULT_MODEL = os.environ.get("OPENCLAW_DEFAULT_MODEL") or (
@@ -172,8 +172,7 @@ class OpenClawFullSync:
             print("[SYNC] WARNING: HF_TOKEN not set. Persistence disabled.")
             return
         if not HF_REPO_ID:
-            print("[SYNC] INFO: OPENCLAW_DATASET_REPO not set and AUTO_CREATE_DATASET is disabled.")
-            print("[SYNC]   → Set OPENCLAW_DATASET_REPO, or set AUTO_CREATE_DATASET=true to auto-create.")
+            print("[SYNC] WARNING: Could not determine dataset repo (no SPACE_ID or OPENCLAW_DATASET_REPO).")
             print("[SYNC] Persistence disabled.")
             return
 
@@ -184,7 +183,7 @@ class OpenClawFullSync:
     # ── Repo management ────────────────────────────────────────────────
 
     def _ensure_repo_exists(self):
-        """Check if dataset repo exists; auto-create if AUTO_CREATE_DATASET is enabled."""
+        """Check if dataset repo exists; auto-create only when AUTO_CREATE_DATASET=true AND HF_TOKEN is set."""
         try:
             self.api.repo_info(repo_id=HF_REPO_ID, repo_type="dataset")
             print(f"[SYNC] Dataset repo found: {HF_REPO_ID}")
@@ -192,10 +191,10 @@ class OpenClawFullSync:
         except Exception:
             if not AUTO_CREATE_DATASET:
                 print(f"[SYNC] Dataset repo NOT found: {HF_REPO_ID}")
-                print(f"[SYNC] AUTO_CREATE_DATASET is disabled. Please create the dataset repo manually.")
-                print(f"[SYNC]   → https://huggingface.co/new-dataset")
+                print(f"[SYNC]   Set AUTO_CREATE_DATASET=true to auto-create.")
+                print(f"[SYNC] Persistence disabled (app will still run normally).")
                 return False
-            print(f"[SYNC] Dataset repo NOT found: {HF_REPO_ID} - creating...")
+            print(f"[SYNC] Dataset repo NOT found: {HF_REPO_ID} — creating...")
             try:
                 self.api.create_repo(
                     repo_id=HF_REPO_ID,
@@ -348,9 +347,12 @@ class OpenClawFullSync:
             try:
                 with open(config_path, "r") as f:
                     cfg = json.load(f)
-                # Ensure default token
+                # Set auth based on GATEWAY_TOKEN env var
                 if "gateway" in cfg:
-                    cfg["gateway"]["auth"] = {"token": "huggingclaw"}
+                    if GATEWAY_TOKEN:
+                        cfg["gateway"]["auth"] = {"token": GATEWAY_TOKEN}
+                    else:
+                        cfg["gateway"]["auth"] = {"mode": "none"}
                 if OPENAI_API_KEY and "models" in cfg and "providers" in cfg["models"] and "openai" in cfg["models"]["providers"]:
                     cfg["models"]["providers"]["openai"]["apiKey"] = OPENAI_API_KEY
                     if OPENAI_BASE_URL:
@@ -429,11 +431,18 @@ class OpenClawFullSync:
             if SPACE_HOST:
                 allowed_origins.append(f"https://{SPACE_HOST}")
                 print(f"[SYNC] SPACE_HOST detected: {SPACE_HOST}")
+            # Auth: token mode if GATEWAY_TOKEN is set, otherwise no-auth mode
+            if GATEWAY_TOKEN:
+                auth_cfg = {"token": GATEWAY_TOKEN}
+                auth_label = f"token"
+            else:
+                auth_cfg = {"mode": "none"}
+                auth_label = "none (open access)"
             data["gateway"] = {
                 "mode": "local",
                 "bind": "lan",
                 "port": 7860,
-                "auth": {"token": GATEWAY_TOKEN},
+                "auth": auth_cfg,
                 "trustedProxies": ["0.0.0.0/0"],
                 "controlUi": {
                     "allowInsecureAuth": True,
@@ -441,7 +450,7 @@ class OpenClawFullSync:
                     "allowedOrigins": allowed_origins
                 }
             }
-            print(f"[SYNC] Set gateway config (auth=token:{GATEWAY_TOKEN}, origins={len(allowed_origins)})")
+            print(f"[SYNC] Set gateway config (auth={auth_label}, origins={len(allowed_origins)})")
 
             # Ensure agents defaults
             data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})

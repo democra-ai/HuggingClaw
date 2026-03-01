@@ -112,7 +112,7 @@ Fine-tune persistence and performance. Set these as **Repository Secrets** in HF
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GATEWAY_TOKEN` | `huggingclaw` | **Gateway token for Control UI access.** Override to set a custom token. |
+| `GATEWAY_TOKEN` | _(none)_ | **Gateway token.** If set, Control UI requires this token to connect. If not set, anyone with the URL can access. |
 | `AUTO_CREATE_DATASET` | `false` | **Auto-create the Dataset repo.** Set to `true` to auto-create a private Dataset repo on first startup. |
 | `SYNC_INTERVAL` | `60` | **Backup interval in seconds.** How often data syncs to the Dataset repo. |
 
@@ -120,7 +120,7 @@ Fine-tune persistence and performance. Set these as **Repository Secrets** in HF
 
 ### 3. Open the Control UI
 
-Visit your Space URL. The Control UI uses device-based authentication — only browsers paired through your HuggingFace profile can connect.
+Visit your Space URL — the Control UI connects automatically, no token needed. To add access control, set the `GATEWAY_TOKEN` secret.
 
 Messaging integrations (Telegram, WhatsApp) can be configured directly inside the Control UI after connecting.
 
@@ -141,7 +141,7 @@ HuggingClaw adds its own variables for persistence and deployment: `HF_TOKEN`, `
 
 ## Security
 
-- **Device authentication** — only browsers paired through your HuggingFace profile can access the Control UI; incognito or third-party browsers are denied
+- **Optional token auth** — set `GATEWAY_TOKEN` to restrict Control UI access; without it, the UI is open for easy setup
 - **Secrets stay server-side** — API keys and tokens are never exposed to the browser
 - **Private backups** — the Dataset repo is created as private by default
 
