@@ -172,6 +172,7 @@ class OpenClawFullSync:
             if not openclaw_files:
                 print(f"[SYNC] No {DATASET_PATH}/ folder in dataset. Starting fresh.")
                 self._ensure_default_config()
+                self._patch_config()
                 return
 
             print(f"[SYNC] Found {len(openclaw_files)} files under {DATASET_PATH}/ in dataset")
