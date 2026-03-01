@@ -23,6 +23,9 @@ fi
 # Enable Node.js DNS fix (will use resolved file when ready)
 export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/scripts/dns-fix.cjs"
 
+# Enable Telegram API proxy (redirects fetch() to working mirror if needed)
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/scripts/telegram-proxy.cjs"
+
 # ── Extensions symlink ──────────────────────────────────────────────────────
 SYMLINK_START=$(date +%s)
 if [ ! -L /home/node/.openclaw/extensions ]; then

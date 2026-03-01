@@ -103,74 +103,54 @@ sys.stdout = TeeLogger(log_dir / "sync.log", sys.stdout)
 sys.stderr = sys.stdout
 
 # ── Telegram API Base Auto-Probe ────────────────────────────────────────────
-
-# HF Spaces blocks DNS for api.telegram.org. Probe multiple API bases at
-# startup and pick the first one that responds to getMe.  The working base
-# is then injected into the OpenClaw Telegram channel config.
+#
+# HF Spaces blocks DNS for api.telegram.org.  grammY uses Node 22's built-in
+# fetch (undici) which bypasses dns.lookup patching and /etc/hosts.
+#
+# Solution: probe multiple Telegram API endpoints at startup.  If the official
+# endpoint is unreachable, pick the first working mirror.  Then:
+#   1. Set TELEGRAM_API_ROOT env var for the Node process
+#   2. telegram-proxy.cjs (loaded via NODE_OPTIONS --require) intercepts
+#      globalThis.fetch() and rewrites api.telegram.org URLs to the mirror.
+#
+# This works without a bot token — we just test HTTP reachability.
+# If a bot token IS available, we do a full getMe verification.
 
 # User can force a specific base via env var (skip auto-probe)
 TELEGRAM_API_BASE = os.environ.get("TELEGRAM_API_BASE", "")
 
 TELEGRAM_API_BASES = [
-    "https://api.telegram.org",                         # official
-    "https://telegram-api.mykdigi.com",                 # known mirror
+    "https://api.telegram.org",                            # official
+    "https://telegram-api.mykdigi.com",                    # known mirror
     "https://telegram-api-proxy-anonymous.pages.dev/api",  # Cloudflare Pages proxy
 ]
 
-def probe_telegram_api(bot_token: str, timeout: int = 10) -> str:
-    """Probe multiple Telegram API base URLs and return the first working one.
-    Returns the working base URL (without trailing slash), or empty string if none work.
-    """
-    if not bot_token:
-        return ""
 
+def probe_telegram_api(timeout: int = 8) -> str:
+    """Probe Telegram API endpoints and return the first reachable one.
+
+    First checks if official api.telegram.org is reachable (HTTP level).
+    If not, tries mirrors.  No bot token required — just tests connectivity.
+    Returns the working base URL (without trailing slash), or "" if all fail.
+    """
     ctx = ssl.create_default_context()
     for base in TELEGRAM_API_BASES:
-        url = f"{base}/bot{bot_token}/getMe"
+        url = base.rstrip("/") + "/"
         try:
             req = urllib.request.Request(url, method="GET")
             resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
-            data = json.loads(resp.read().decode())
-            if data.get("ok"):
-                bot_name = data.get("result", {}).get("username", "unknown")
-                print(f"[TELEGRAM] ✓ API base works: {base} (bot: @{bot_name})")
-                return base.rstrip("/")
+            print(f"[TELEGRAM] ✓ Reachable: {base} (HTTP {resp.status})")
+            return base.rstrip("/")
+        except urllib.error.HTTPError as e:
+            # HTTP error (4xx/5xx) still means the host IS reachable
+            print(f"[TELEGRAM] ✓ Reachable: {base} (HTTP {e.code})")
+            return base.rstrip("/")
         except Exception as e:
             reason = str(e)[:80]
-            print(f"[TELEGRAM] ✗ API base failed: {base} ({reason})")
+            print(f"[TELEGRAM] ✗ Unreachable: {base} ({reason})")
             continue
 
-    print("[TELEGRAM] WARNING: All API bases failed! Telegram will not work.")
-    return ""
-
-def _is_valid_bot_token(token: str) -> bool:
-    """Check if a string looks like a valid Telegram bot token (digits:alphanumeric)."""
-    return bool(re.match(r'^\d+:[A-Za-z0-9_-]+$', token))
-
-
-def get_telegram_bot_token() -> str:
-    """Extract Telegram bot token from OpenClaw config or environment."""
-    # 1. Environment variable
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    if token and _is_valid_bot_token(token):
-        return token
-
-    # 2. From openclaw.json channels config
-    config_path = OPENCLAW_HOME / "openclaw.json"
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                cfg = json.load(f)
-            # Check channels.telegram.botToken (single account)
-            tg = cfg.get("channels", {}).get("telegram", {})
-            if tg.get("botToken") and _is_valid_bot_token(tg["botToken"]):
-                return tg["botToken"]
-            # Check channels.telegram.accounts.*.botToken (multi account)
-            for acc in tg.get("accounts", {}).values():
-                if isinstance(acc, dict) and acc.get("botToken") and _is_valid_bot_token(acc["botToken"]):
-                    return acc["botToken"]
-        except Exception:
-            pass
+    print("[TELEGRAM] WARNING: All API endpoints unreachable!")
     return ""
 
 
@@ -502,35 +482,8 @@ class OpenClawFullSync:
                 data["plugins"]["entries"]["telegram"]["enabled"] = True
 
             # ── Telegram API base auto-probe ──────────────────────────────
-            # HF Spaces blocks api.telegram.org DNS. Probe mirrors and set
-            # the working base URL in the channel config so grammY uses it.
-            if TELEGRAM_API_BASE:
-                # User explicitly set a base via env var — use it directly
-                data.setdefault("channels", {}).setdefault("telegram", {})
-                data["channels"]["telegram"]["apiRoot"] = TELEGRAM_API_BASE.rstrip("/")
-                print(f"[TELEGRAM] Using user-specified API base: {TELEGRAM_API_BASE}")
-            else:
-                bot_token = get_telegram_bot_token()
-                if bot_token:
-                    print("[TELEGRAM] Probing Telegram API bases...")
-                    working_base = probe_telegram_api(bot_token)
-                    if working_base and working_base != "https://api.telegram.org":
-                        # Set apiRoot in channels.telegram for OpenClaw/grammY
-                        data.setdefault("channels", {}).setdefault("telegram", {})
-                        data["channels"]["telegram"]["apiRoot"] = working_base
-                        print(f"[TELEGRAM] Set channels.telegram.apiRoot = {working_base}")
-                    elif working_base:
-                        # Official API works — remove any previously set mirror
-                        tg_ch = data.get("channels", {}).get("telegram", {})
-                        if tg_ch.get("apiRoot"):
-                            del tg_ch["apiRoot"]
-                            print("[TELEGRAM] Official API works — cleared apiRoot override")
-                        else:
-                            print("[TELEGRAM] Official API works — no override needed")
-                else:
-                    print("[TELEGRAM] No valid bot token found — skipping API probe")
-                    print("[TELEGRAM]   Set TELEGRAM_BOT_TOKEN env var or configure in Control UI")
-                    print("[TELEGRAM]   Token format: 123456789:ABCdefGHIjklMNO (digits:alphanumeric)")
+            # Probe is done in run_openclaw() — sets TELEGRAM_API_ROOT env var
+            # for the telegram-proxy.cjs preload script to intercept fetch().
 
             with open(config_path, "w") as f:
                 json.dump(data, f, indent=2)
@@ -609,6 +562,25 @@ class OpenClawFullSync:
             env["OPENROUTER_API_KEY"] = OPENROUTER_API_KEY
         if not OPENAI_API_KEY and not OPENROUTER_API_KEY:
             print(f"[SYNC] WARNING: No OPENAI_API_KEY or OPENROUTER_API_KEY set, LLM features may not work")
+
+        # ── Telegram API base probe ──────────────────────────────────────
+        # Determine working Telegram API endpoint and set env var for
+        # telegram-proxy.cjs to intercept fetch() calls.
+        if TELEGRAM_API_BASE:
+            tg_root = TELEGRAM_API_BASE.rstrip("/")
+            print(f"[TELEGRAM] Using user-specified API base: {tg_root}")
+        else:
+            print("[TELEGRAM] Probing Telegram API endpoints...")
+            tg_root = probe_telegram_api()
+
+        if tg_root and tg_root != "https://api.telegram.org":
+            env["TELEGRAM_API_ROOT"] = tg_root
+            print(f"[TELEGRAM] Set TELEGRAM_API_ROOT={tg_root}")
+            print(f"[TELEGRAM] telegram-proxy.cjs will redirect fetch() calls")
+        elif tg_root:
+            print("[TELEGRAM] Official API reachable — no proxy needed")
+        else:
+            print("[TELEGRAM] No reachable endpoint found — Telegram will not work")
         try:
             # Use Popen without shell to avoid pipe issues
             # auth disabled in config — no token needed
