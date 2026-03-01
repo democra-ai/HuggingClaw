@@ -42,7 +42,14 @@ tags:
   <br/><br/>
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-  [![HF Spaces](https://img.shields.io/badge/%F0%9F%A4%97-HuggingFace%20Spaces-blue)](https://huggingface.co/spaces/tao-shen/HuggingClaw)
+  [![Hugging Face](https://img.shields.io/badge/🤗-Hugging%20Face-yellow)](https://huggingface.co)
+  [![HF Spaces](https://img.shields.io/badge/Spaces-HuggingFace-blue)](https://huggingface.co/spaces/tao-shen/HuggingClaw)
+  [![OpenClaw](https://img.shields.io/badge/OpenClaw-Powered-orange)](https://github.com/openclaw/openclaw)
+  [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://www.docker.com/)
+  [![OpenAI Compatible](https://img.shields.io/badge/OpenAI--compatible-API-green)](https://openclawdoc.com/docs/reference/environment-variables)
+  [![WhatsApp](https://img.shields.io/badge/WhatsApp-Enabled-25D366?logo=whatsapp)](https://www.whatsapp.com/)
+  [![Telegram](https://img.shields.io/badge/Telegram-Enabled-26A5E4?logo=telegram)](https://telegram.org/)
+  [![Free Tier](https://img.shields.io/badge/Free%20Tier-16GB%20RAM-brightgreen)](https://huggingface.co/spaces)
 </div>
 
 ---
@@ -90,45 +97,14 @@ Messaging integrations (Telegram, WhatsApp) can be configured directly inside th
 
 ## Configuration
 
-HuggingClaw is configured entirely through **environment variables**. A fully documented template is provided in [`.env.example`](.env.example).
+HuggingClaw supports **all OpenClaw environment variables** — it passes the entire environment to the OpenClaw process (`env=os.environ.copy()`), so any variable from the [OpenClaw docs](https://openclawdoc.com/docs/reference/environment-variables) (API Keys, Server, Memory, Network, Ollama, Secrets Manager, etc.) works out of the box in HF Spaces.
 
-| Category | Variables | Purpose |
-|----------|-----------|---------|
-| **Security** | `OPENCLAW_PASSWORD` | Protect the Control UI with a password |
-| **Persistence** | `HF_TOKEN`, `OPENCLAW_DATASET_REPO`, `AUTO_CREATE_DATASET`, `SYNC_INTERVAL` | Auto-backup to HF Dataset |
-| **LLM (OpenAI-compatible)** | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENCLAW_DEFAULT_MODEL` | Power AI conversations ([OpenClaw env reference](https://openclawdoc.com/docs/reference/environment-variables)) |
-| **Performance** | `NODE_MEMORY_LIMIT` | Tune Node.js memory usage |
-| **Locale** | `TZ` | Set timezone for logs |
-
-For local development, copy the template and fill in your values:
-
-```bash
-cp .env.example .env
-# Edit .env with your values
-```
-
-## Local Development
-
-```bash
-git clone https://huggingface.co/spaces/tao-shen/HuggingClaw
-cd HuggingClaw
-
-# Configure
-cp .env.example .env
-# Edit .env — at minimum set HF_TOKEN and OPENCLAW_DATASET_REPO
-
-# Build and run
-docker build -t huggingclaw .
-docker run --rm -p 7860:7860 --env-file .env huggingclaw
-```
-
-Open `http://localhost:7860` in your browser.
+HuggingClaw adds a few variables of its own for persistence and deployment: `HF_TOKEN`, `OPENCLAW_DATASET_REPO`, `AUTO_CREATE_DATASET`, `SYNC_INTERVAL`, `OPENCLAW_PASSWORD`, `OPENCLAW_DEFAULT_MODEL`, etc. For the full list, see [`.env.example`](.env.example).
 
 ## Security
 
 - **Password-protected** — the Control UI requires a password to connect and manage the instance
 - **Secrets stay server-side** — API keys and tokens are never exposed to the browser
-- **CSP headers** — Content Security Policy restricts script and resource loading
 - **Private backups** — the Dataset repo is created as private by default
 
 > **Tip:** Change the default password from `huggingclaw` to something unique by setting the `OPENCLAW_PASSWORD` secret.

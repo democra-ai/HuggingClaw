@@ -57,11 +57,6 @@ APP_DIR       = Path("/app/openclaw")
 # Use ".openclaw" - directly read/write the .openclaw folder in dataset
 DATASET_PATH = ".openclaw"
 
-# Telegram credentials (backward-compatible; prefer configuring via Control UI)
-TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_BOT_NAME   = os.environ.get("TELEGRAM_BOT_NAME", "")
-TELEGRAM_ALLOW_USER = os.environ.get("TELEGRAM_ALLOW_USER", "")
-
 # OpenAI-compatible API (OpenAI, OpenRouter, or any compatible endpoint)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -146,14 +141,12 @@ class OpenClawFullSync:
             print("[SYNC] Persistence disabled - skipping restore")
             self._ensure_default_config()
             self._patch_config()
-            self._ensure_telegram_credentials()
             return
 
         if not self.dataset_exists:
             print(f"[SYNC] Dataset {HF_REPO_ID} does not exist - starting fresh")
             self._ensure_default_config()
             self._patch_config()
-            self._ensure_telegram_credentials()
             return
 
         print(f"[SYNC] ▶ Restoring ~/.openclaw from dataset {HF_REPO_ID} ...")
@@ -165,8 +158,7 @@ class OpenClawFullSync:
             if not openclaw_files:
                 print(f"[SYNC] No {DATASET_PATH}/ folder in dataset. Starting fresh.")
                 self._ensure_default_config()
-                self._ensure_telegram_credentials()
-                return
+                    return
 
             print(f"[SYNC] Found {len(openclaw_files)} files under {DATASET_PATH}/ in dataset")
 
@@ -194,7 +186,7 @@ class OpenClawFullSync:
             print(f"[SYNC] ✗ Restore failed: {e}")
             traceback.print_exc()
 
-        # Patch config & telegram after restore
+        # Patch config after restore
         self._patch_config()
         self._ensure_telegram_credentials()
         self._debug_list_files()
@@ -434,36 +426,6 @@ class OpenClawFullSync:
         except Exception as e:
             print(f"[SYNC] Failed to patch config: {e}")
             traceback.print_exc()
-
-    def _ensure_telegram_credentials(self):
-        """Configure Telegram bot token and allowed users."""
-        creds_dir = OPENCLAW_HOME / "credentials"
-        creds_dir.mkdir(parents=True, exist_ok=True)
-
-        if TELEGRAM_BOT_TOKEN:
-            bot_file = creds_dir / "telegram-bot-token.json"
-            with open(bot_file, "w") as f:
-                json.dump({"token": TELEGRAM_BOT_TOKEN, "bot": TELEGRAM_BOT_NAME}, f, indent=2)
-            print(f"[SYNC] Telegram bot configured: {TELEGRAM_BOT_NAME}")
-
-        allow_file = creds_dir / "telegram-allowFrom.json"
-        if not allow_file.exists():
-            with open(allow_file, "w") as f:
-                json.dump([TELEGRAM_ALLOW_USER], f, indent=2)
-            print(f"[SYNC] Created telegram-allowFrom.json for {TELEGRAM_ALLOW_USER}")
-        else:
-            try:
-                with open(allow_file, "r") as f:
-                    data = json.load(f)
-                if not isinstance(data, list):
-                    data = [TELEGRAM_ALLOW_USER]
-                elif TELEGRAM_ALLOW_USER not in data:
-                    data.append(TELEGRAM_ALLOW_USER)
-                with open(allow_file, "w") as f:
-                    json.dump(data, f, indent=2)
-            except Exception:
-                with open(allow_file, "w") as f:
-                    json.dump([TELEGRAM_ALLOW_USER], f, indent=2)
 
     def _debug_list_files(self):
         print(f"[SYNC] Local ~/.openclaw tree:")
