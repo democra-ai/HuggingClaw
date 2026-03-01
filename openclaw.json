@@ -9,7 +9,6 @@
     ],
     "controlUi": {
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true,
       "allowedOrigins": [
         "https://huggingface.co",
         "https://*.hf.space"
