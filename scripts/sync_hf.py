@@ -76,7 +76,7 @@ OPENCLAW_DEFAULT_MODEL = os.environ.get("OPENCLAW_DEFAULT_MODEL") or (
 SPACE_HOST = os.environ.get("SPACE_HOST", "")   # e.g. "tao-shen-huggingclaw.hf.space"
 SPACE_ID   = os.environ.get("SPACE_ID", "")      # e.g. "tao-shen/HuggingClaw"
 
-SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL", "120"))
+SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL", "60"))
 AUTO_CREATE_DATASET = os.environ.get("AUTO_CREATE_DATASET", "true").lower() in ("true", "1", "yes")
 
 # Setup logging

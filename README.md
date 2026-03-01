@@ -76,18 +76,29 @@ Click **Duplicate this Space** on the [HuggingClaw Space page](https://huggingfa
 
 Go to **Settings → Repository secrets** and configure:
 
-| Secret | Status | Description |
-|--------|:------:|-------------|
-| `OPENCLAW_PASSWORD` | Recommended | Password for the Control UI (default: `huggingclaw`) |
-| `HF_TOKEN` | **Required** | HF Access Token with write permission ([create one](https://huggingface.co/settings/tokens)) |
-| `OPENCLAW_DATASET_REPO` | **Required** | Dataset repo for backup, e.g. `your-name/HuggingClaw-data` |
-| `OPENAI_API_KEY` | Recommended | OpenAI (or any [OpenAI-compatible](https://openclawdoc.com/docs/reference/environment-variables)) API key for LLM |
-| `OPENROUTER_API_KEY` | Optional | [OpenRouter](https://openrouter.ai) API key (200+ models, free tier) |
-| `ANTHROPIC_API_KEY` | Optional | Anthropic Claude API key |
-| `GOOGLE_API_KEY` | Optional | Google / Gemini API key |
-| `OPENCLAW_DEFAULT_MODEL` | Optional | Default model, e.g. `openrouter/openai/gpt-oss-20b:free` or `openai/gpt-5-nano` |
+| Secret | Status | Description | Example |
+|--------|:------:|-------------|---------|
+| `OPENCLAW_PASSWORD` | Recommended | Password for the Control UI (default: `huggingclaw`) | `my-secret-password` |
+| `HF_TOKEN` | **Required** | HF Access Token with write permission ([create one](https://huggingface.co/settings/tokens)) | `hf_AbCdEfGhIjKlMnOpQrStUvWxYz` |
+| `OPENCLAW_DATASET_REPO` | **Required** | Dataset repo for backup — format: `username/repo-name` | `tao-shen/HuggingClaw-data` |
+| `OPENAI_API_KEY` | Recommended | OpenAI (or any [OpenAI-compatible](https://openclawdoc.com/docs/reference/environment-variables)) API key | `sk-proj-xxxxxxxxxxxx` |
+| `OPENROUTER_API_KEY` | Optional | [OpenRouter](https://openrouter.ai) API key (200+ models, free tier available) | `sk-or-v1-xxxxxxxxxxxx` |
+| `ANTHROPIC_API_KEY` | Optional | Anthropic Claude API key | `sk-ant-xxxxxxxxxxxx` |
+| `GOOGLE_API_KEY` | Optional | Google / Gemini API key | `AIzaSyXxXxXxXxXx` |
+| `OPENCLAW_DEFAULT_MODEL` | Optional | Default model for new conversations | `openrouter/openai/gpt-oss-20b:free` |
 
-> For the full list of environment variables, see [`.env.example`](.env.example).
+### Environment Variables
+
+In addition to the secrets above, HuggingClaw provides environment variables to fine-tune persistence and performance. Set these the same way — as **Repository Secrets** in HF Spaces, or in your `.env` file for local Docker.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTO_CREATE_DATASET` | `true` | **Auto-create the Dataset repo** if it doesn't exist. When set to `true`, HuggingClaw automatically creates a **private** HuggingFace Dataset repo (using the name from `OPENCLAW_DATASET_REPO`) on first startup. Set to `false` if you prefer to [create the repo manually](https://huggingface.co/new-dataset) before deploying. Accepted values: `true`, `1`, `yes` (enabled) / `false`, `0`, `no` (disabled). |
+| `SYNC_INTERVAL` | `60` | **Backup interval in seconds.** How often HuggingClaw syncs the `~/.openclaw` directory (conversations, settings, credentials) to the HuggingFace Dataset repo. Lower values mean less data loss on restart but more API calls. Recommended: `60`–`300`. |
+| `NODE_MEMORY_LIMIT` | `512` | **Node.js heap memory limit in MB.** HF free tier provides 16 GB RAM; the default 512 MB is enough for most cases. Increase if you run complex agent workflows or handle very large conversations. |
+| `TZ` | `UTC` | **Timezone** for log timestamps and scheduled tasks. Example: `Asia/Shanghai`, `America/New_York`. |
+
+> For the full list of environment variables (including `OPENAI_BASE_URL`, `OLLAMA_HOST`, proxy settings, and more), see [`.env.example`](.env.example).
 
 ### 3. Open the Control UI
 
@@ -97,9 +108,16 @@ Messaging integrations (Telegram, WhatsApp) can be configured directly inside th
 
 ## Configuration
 
-HuggingClaw supports **all OpenClaw environment variables** — it passes the entire environment to the OpenClaw process (`env=os.environ.copy()`), so any variable from the [OpenClaw docs](https://openclawdoc.com/docs/reference/environment-variables) (API Keys, Server, Memory, Network, Ollama, Secrets Manager, etc.) works out of the box in HF Spaces.
+HuggingClaw supports **all OpenClaw environment variables** — it passes the entire environment to the OpenClaw process (`env=os.environ.copy()`), so any variable from the [OpenClaw docs](https://openclawdoc.com/docs/reference/environment-variables) works out of the box in HF Spaces. This includes:
 
-HuggingClaw adds a few variables of its own for persistence and deployment: `HF_TOKEN`, `OPENCLAW_DATASET_REPO`, `AUTO_CREATE_DATASET`, `SYNC_INTERVAL`, `OPENCLAW_PASSWORD`, `OPENCLAW_DEFAULT_MODEL`, etc. For the full list, see [`.env.example`](.env.example).
+- **API Keys** — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENROUTER_API_KEY`
+- **Server** — `OPENCLAW_API_PORT`, `OPENCLAW_WS_PORT`, `OPENCLAW_HOST`
+- **Memory** — `OPENCLAW_MEMORY_BACKEND`, `OPENCLAW_REDIS_URL`, `OPENCLAW_SQLITE_PATH`
+- **Network** — `OPENCLAW_HTTP_PROXY`, `OPENCLAW_HTTPS_PROXY`, `OPENCLAW_NO_PROXY`
+- **Ollama** — `OLLAMA_HOST`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_KEEP_ALIVE`
+- **Secrets** — `OPENCLAW_SECRETS_BACKEND`, `VAULT_ADDR`, `VAULT_TOKEN`
+
+HuggingClaw adds its own variables for persistence and deployment: `HF_TOKEN`, `OPENCLAW_DATASET_REPO`, `AUTO_CREATE_DATASET`, `SYNC_INTERVAL`, `OPENCLAW_PASSWORD`, `OPENCLAW_DEFAULT_MODEL`, etc. See [`.env.example`](.env.example) for the complete reference.
 
 ## Security
 
