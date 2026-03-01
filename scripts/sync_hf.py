@@ -481,6 +481,14 @@ class OpenClawFullSync:
             elif isinstance(data["plugins"]["entries"]["telegram"], dict):
                 data["plugins"]["entries"]["telegram"]["enabled"] = True
 
+            # ── Telegram channel defaults (open DM policy for HF Spaces) ──
+            # Personal bot on HF Spaces — no need for strict pairing.
+            tg_ch = data.setdefault("channels", {}).setdefault("telegram", {})
+            if tg_ch.get("dmPolicy") in ("pairing", None):
+                tg_ch["dmPolicy"] = "open"
+                print("[SYNC] Set channels.telegram.dmPolicy = open")
+            tg_ch["configWrites"] = True
+
             # ── Telegram API base auto-probe ──────────────────────────────
             # Probe is done in run_openclaw() — sets TELEGRAM_API_ROOT env var
             # for the telegram-proxy.cjs preload script to intercept fetch().
