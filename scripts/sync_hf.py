@@ -74,7 +74,7 @@ GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "huggingclaw")
 # Default model for new conversations (infer from provider if not set)
 OPENCLAW_DEFAULT_MODEL = os.environ.get("OPENCLAW_DEFAULT_MODEL") or (
     "openai/gpt-5-nano" if OPENAI_API_KEY
-    else "zhipu/glm-4-flash" if ZHIPU_API_KEY
+    else "zhipu/glm-4.5-air" if ZHIPU_API_KEY
     else "openrouter/openai/gpt-oss-20b:free"
 )
 
@@ -478,9 +478,11 @@ class OpenClawFullSync:
                     "apiKey": ZHIPU_API_KEY,
                     "api": "openai-completions",
                     "models": [
-                        {"id": "glm-4-flash", "name": "GLM-4 Flash"},
-                        {"id": "glm-4-plus", "name": "GLM-4 Plus"},
-                        {"id": "glm-4-long", "name": "GLM-4 Long"},
+                        {"id": "glm-4.5-air", "name": "GLM-4.5 Air"},
+                        {"id": "glm-4.5", "name": "GLM-4.5"},
+                        {"id": "glm-4.6", "name": "GLM-4.6"},
+                        {"id": "glm-4.7", "name": "GLM-4.7"},
+                        {"id": "glm-5", "name": "GLM-5"},
                     ]
                 }
                 print("[SYNC] Set Zhipu AI provider")
