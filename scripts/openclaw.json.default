@@ -21,12 +21,16 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "glm-4-plus",
-            "name": "GLM-4 Plus"
+            "id": "glm-4.5-air",
+            "name": "GLM-4.5 Air"
           },
           {
-            "id": "glm-4-flash",
-            "name": "GLM-4 Flash"
+            "id": "glm-4.5",
+            "name": "GLM-4.5"
+          },
+          {
+            "id": "glm-4.6",
+            "name": "GLM-4.6"
           }
         ]
       },
@@ -45,7 +49,7 @@
     "defaults": {
       "workspace": "~/.openclaw/workspace",
       "model": {
-        "primary": "zhipu/glm-4-flash"
+        "primary": "zhipu/glm-4.5-air"
       }
     }
   }
