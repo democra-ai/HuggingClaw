@@ -286,6 +286,11 @@ class OpenClawFullSync:
             return
 
         print(f"[SYNC] ▶ Uploading ~/.openclaw → dataset {HF_REPO_ID}/{DATASET_PATH}/ ...")
+        # Notify state bridge
+        try:
+            Path("/tmp/openclaw-sync-state.json").write_text(json.dumps({"phase": "syncing", "detail": "Uploading data..."}))
+        except Exception:
+            pass
 
         try:
             # Log what will be uploaded
@@ -322,6 +327,11 @@ class OpenClawFullSync:
                 ],
             )
             print(f"[SYNC] ✓ Upload completed at {datetime.now().isoformat()}")
+            # Notify state bridge
+            try:
+                Path("/tmp/openclaw-sync-state.json").write_text(json.dumps({"phase": "idle", "detail": "Ready"}))
+            except Exception:
+                pass
 
             # Verify
             try:
@@ -338,6 +348,11 @@ class OpenClawFullSync:
         except Exception as e:
             print(f"[SYNC] ✗ Upload failed: {e}")
             traceback.print_exc()
+            # Notify state bridge of error
+            try:
+                Path("/tmp/openclaw-sync-state.json").write_text(json.dumps({"phase": "idle", "detail": "Sync failed"}))
+            except Exception:
+                pass
 
     # ── Config helpers ─────────────────────────────────────────────────
 
@@ -378,7 +393,7 @@ class OpenClawFullSync:
             with open(config_path, "w") as f:
                 json.dump({
                     "gateway": {
-                        "mode": "local", "bind": "lan", "port": 7860,
+                        "mode": "local", "bind": "lan", "port": 7861,
                         "trustedProxies": ["0.0.0.0/0"],
                         "controlUi": {
                             "allowInsecureAuth": True,
@@ -436,7 +451,7 @@ class OpenClawFullSync:
             data["gateway"] = {
                 "mode": "local",
                 "bind": "lan",
-                "port": 7860,
+                "port": 7861,
                 "auth": {"token": GATEWAY_TOKEN},
                 "trustedProxies": ["0.0.0.0/0"],
                 "controlUi": {
@@ -490,9 +505,34 @@ class OpenClawFullSync:
             data.setdefault("models", {})["providers"] = providers
             data["agents"]["defaults"]["model"]["primary"] = OPENCLAW_DEFAULT_MODEL
 
-            # Plugin whitelist (only load telegram + whatsapp to speed up startup)
+            # Plugin whitelist
             data.setdefault("plugins", {}).setdefault("entries", {})
-            data["plugins"]["allow"] = ["telegram", "whatsapp"]
+            plugin_allow = ["telegram", "whatsapp"]
+
+            # ── A2A Gateway Plugin ──────────────────────────────────────────
+            a2a_peers_env = os.environ.get("A2A_PEERS", "")
+            if a2a_peers_env:
+                plugin_allow.append("a2a-gateway")
+                peers_list = [
+                    {"url": f"{url.rstrip('/')}/.well-known/agent.json"}
+                    for url in a2a_peers_env.split(",") if url.strip()
+                ]
+                a2a_token = os.environ.get("A2A_PEER_TOKEN", "")
+                a2a_config = {
+                    "enabled": True,
+                    "config": {
+                        "server": {"port": 7861},
+                        "peers": peers_list,
+                    }
+                }
+                if a2a_token:
+                    a2a_config["config"]["security"] = {"inbound": {"token": a2a_token}}
+                    for p in peers_list:
+                        p["auth"] = {"type": "bearer", "token": a2a_token}
+                data["plugins"]["entries"]["a2a-gateway"] = a2a_config
+                print(f"[SYNC] Set A2A gateway plugin with {len(peers_list)} peer(s)")
+
+            data["plugins"]["allow"] = plugin_allow
             if "telegram" not in data["plugins"]["entries"]:
                 data["plugins"]["entries"]["telegram"] = {"enabled": True}
             elif isinstance(data["plugins"]["entries"]["telegram"], dict):
@@ -647,6 +687,42 @@ class OpenClawFullSync:
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
+def start_proxy():
+    """Start the Express proxy server (port 7860) before OpenClaw.
+    This ensures HF Spaces sees the container as ready immediately."""
+    proxy_script = Path(__file__).parent / "proxy.cjs"
+    if not proxy_script.exists():
+        print("[PROXY] WARNING: proxy.cjs not found, skipping proxy startup")
+        return None
+
+    print("[PROXY] Starting Express proxy on port 7860...")
+    env = os.environ.copy()
+    try:
+        proxy_proc = subprocess.Popen(
+            ["node", str(proxy_script)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        # Copy proxy output in background
+        def copy_proxy_output():
+            try:
+                for line in proxy_proc.stdout:
+                    print(f"[PROXY] {line}", end='')
+            except Exception:
+                pass
+
+        threading.Thread(target=copy_proxy_output, daemon=True).start()
+        print(f"[PROXY] Proxy started with PID: {proxy_proc.pid}")
+        return proxy_proc
+    except Exception as e:
+        print(f"[PROXY] ERROR: Failed to start proxy: {e}")
+        return None
+
+
 def main():
     try:
         t_main_start = time.time()
@@ -654,6 +730,9 @@ def main():
         t0 = time.time()
         sync = OpenClawFullSync()
         print(f"[TIMER] sync_hf init: {time.time() - t0:.1f}s")
+
+        # 0. Start proxy first (so HF Spaces sees port 7860 ready)
+        proxy_process = start_proxy()
 
         # 1. Restore
         t0 = time.time()
@@ -683,6 +762,12 @@ def main():
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
+            if proxy_process:
+                proxy_process.terminate()
+                try:
+                    proxy_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proxy_process.kill()
             print("[SYNC] Final sync...")
             sync.save_to_repo()
             sys.exit(0)
@@ -695,12 +780,16 @@ def main():
             print("[SYNC] ERROR: Failed to start OpenClaw process. Exiting.")
             stop_event.set()
             t.join(timeout=5)
+            if proxy_process:
+                proxy_process.terminate()
             sys.exit(1)
 
         exit_code = process.wait()
         print(f"[SYNC] OpenClaw exited with code {exit_code}")
         stop_event.set()
         t.join(timeout=10)
+        if proxy_process:
+            proxy_process.terminate()
         print("[SYNC] Final sync...")
         sync.save_to_repo()
         sys.exit(exit_code)

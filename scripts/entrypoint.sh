@@ -26,8 +26,9 @@ export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/scripts
 # Enable Telegram API proxy (redirects fetch() to working mirror if needed)
 export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/scripts/telegram-proxy.cjs"
 
-# Auto-fill gateway token in Control UI (redirects "/" to "/?token=GATEWAY_TOKEN")
-export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/scripts/token-redirect.cjs"
+# token-redirect.cjs is no longer needed — the Express proxy (proxy.cjs)
+# handles token injection for /admin and serves the animation at /
+# export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/scripts/token-redirect.cjs"
 
 # ── Extensions symlink ──────────────────────────────────────────────────────
 SYMLINK_START=$(date +%s)

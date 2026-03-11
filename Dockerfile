@@ -1,5 +1,5 @@
-# OpenClaw on Hugging Face Spaces — 优化构建（v2）
-# 优化点：node 用户构建（消除 chown）、合并 RUN 层（减少层开销）
+# OpenClaw on Hugging Face Spaces — v3 with Pixel Animation + A2A
+# Features: Star-Office-UI animation homepage, Express proxy, A2A gateway
 FROM node:22-bookworm
 SHELL ["/bin/bash", "-c"]
 
@@ -52,10 +52,32 @@ RUN echo "[build][layer2] Clone + install + build..." && START=$(date +%s) \
   && echo "[build] version: $(cat /app/openclaw/.version)" \
   && echo "[build][layer2] Total clone+install+build: $(($(date +%s) - START))s"
 
-# ── Layer 3 (node): Scripts + Config ──────────────────────────────────────────
+# ── Layer 2b (node): A2A Gateway Plugin ──────────────────────────────────────
+RUN echo "[build][layer2b] A2A gateway plugin..." && START=$(date +%s) \
+  && git clone --depth 1 https://github.com/win4r/openclaw-a2a-gateway.git \
+     /app/openclaw/extensions/a2a-gateway \
+  && cd /app/openclaw/extensions/a2a-gateway \
+  && npm install --production 2>/dev/null || echo "[build] A2A npm install skipped (will retry at runtime)" \
+  && echo "[build][layer2b] A2A gateway: $(($(date +%s) - START))s"
+
+# ── Layer 2c (node): Star-Office-UI frontend assets ──────────────────────────
+# Clone full asset set, then overlay our modified text files on top
+RUN echo "[build][layer2c] Star-Office-UI assets..." && START=$(date +%s) \
+  && git clone --depth 1 https://github.com/ringhyacinth/Star-Office-UI.git /tmp/star-office \
+  && cp -r /tmp/star-office/frontend /home/node/frontend \
+  && rm -rf /tmp/star-office \
+  && echo "[build][layer2c] Star-Office-UI: $(($(date +%s) - START))s"
+
+# ── Layer 3 (node): Scripts + Config + Frontend overrides ────────────────────
 COPY --chown=node:node scripts /home/node/scripts
+# Overlay modified frontend files (index.html, game.js, layout.js) on top of cloned assets
+COPY --chown=node:node frontend/*.html /home/node/frontend/
+COPY --chown=node:node frontend/*.js /home/node/frontend/
 COPY --chown=node:node openclaw.json /home/node/scripts/openclaw.json.default
-RUN chmod +x /home/node/scripts/entrypoint.sh /home/node/scripts/sync_hf.py
+COPY --chown=node:node package.json /home/node/package.json
+RUN chmod +x /home/node/scripts/entrypoint.sh /home/node/scripts/sync_hf.py \
+  && cd /home/node && npm install --production \
+  && echo "[build] Proxy dependencies installed"
 
 ENV NODE_ENV=production
 ENV OPENCLAW_BUNDLED_PLUGINS_DIR=/app/openclaw/empty-bundled-plugins

@@ -1,0 +1,15 @@
+# Binary assets are cloned from Star-Office-UI during Docker build
+# Only modified text files (index.html, game.js, layout.js) are tracked in git
+*.webp
+*.png
+*.jpg
+*.woff2
+*.zip
+*.min.js
+vendor/
+fonts/
+*.py
+*.md
+electron-standalone.html
+invite.html
+join.html
