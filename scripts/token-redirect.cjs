@@ -160,6 +160,21 @@ http.Server.prototype.emit = function (event, ...args) {
       return origEmit.apply(this, [event, ...args]);
     }
 
+    // Fix iframe embedding — must be applied BEFORE any early returns
+    const origWriteHead = res.writeHead;
+    res.writeHead = function (statusCode, ...whArgs) {
+      if (res.getHeader) {
+        res.removeHeader('x-frame-options');
+        const csp = res.getHeader('content-security-policy');
+        if (csp && typeof csp === 'string') {
+          res.setHeader('content-security-policy',
+            csp.replace(/frame-ancestors\s+'none'/i,
+              "frame-ancestors 'self' https://huggingface.co https://*.hf.space"));
+        }
+      }
+      return origWriteHead.apply(this, [statusCode, ...whArgs]);
+    };
+
     const parsed = url.parse(req.url, true);
     const pathname = parsed.pathname;
 
@@ -223,25 +238,6 @@ http.Server.prototype.emit = function (event, ...args) {
         }
       }
     }
-  }
-
-  // Fix iframe embedding on all responses
-  if (event === 'request') {
-    const [req, res] = args;
-    const origWriteHead = res.writeHead;
-    res.writeHead = function (statusCode, ...whArgs) {
-      // Remove X-Frame-Options to allow HF iframe embedding
-      if (res.getHeader) {
-        res.removeHeader('x-frame-options');
-        const csp = res.getHeader('content-security-policy');
-        if (csp && typeof csp === 'string') {
-          res.setHeader('content-security-policy',
-            csp.replace(/frame-ancestors\s+'none'/i,
-              "frame-ancestors 'self' https://huggingface.co https://*.hf.space"));
-        }
-      }
-      return origWriteHead.apply(this, [statusCode, ...whArgs]);
-    };
   }
 
   return origEmit.apply(this, [event, ...args]);
