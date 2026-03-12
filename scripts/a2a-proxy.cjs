@@ -305,24 +305,32 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Serve index.html at /
-  if (pathname === '/' && req.method === 'GET') {
-    const indexPath = path.join(FRONTEND_DIR, 'index.html');
-    return serveStaticFile(res, indexPath);
-  }
-
-  // Serve static assets at /static/*
-  if (pathname.startsWith('/static/')) {
-    const assetPath = path.join(FRONTEND_DIR, pathname.slice('/static/'.length).split('?')[0]);
-    return serveStaticFile(res, assetPath);
-  }
-
-  // Admin panel → proxy to OpenClaw UI directly
-  if (pathname === '/admin' || pathname === '/admin/') {
-    const token = process.env.GATEWAY_TOKEN || '';
-    // Rewrite to OpenClaw root with token
-    req.url = token ? `/?token=${token}` : '/';
-    return proxyRequest(req, res, OPENCLAW_PORT);
+  // Office frontend (only served if OFFICE_MODE=1, e.g. on dedicated office spaces)
+  if (process.env.OFFICE_MODE === '1') {
+    // Serve index.html at /
+    if (pathname === '/' && req.method === 'GET') {
+      const indexPath = path.join(FRONTEND_DIR, 'index.html');
+      return serveStaticFile(res, indexPath);
+    }
+    // Serve static assets at /static/*
+    if (pathname.startsWith('/static/')) {
+      const assetPath = path.join(FRONTEND_DIR, pathname.slice('/static/'.length).split('?')[0]);
+      return serveStaticFile(res, assetPath);
+    }
+    // Admin panel → proxy to OpenClaw UI
+    if (pathname === '/admin' || pathname === '/admin/') {
+      const token = process.env.GATEWAY_TOKEN || '';
+      req.url = token ? `/?token=${token}` : '/';
+      return proxyRequest(req, res, OPENCLAW_PORT);
+    }
+  } else {
+    // Default mode: / goes directly to OpenClaw with token
+    if (pathname === '/' && req.method === 'GET' && !url.parse(req.url, true).query.token) {
+      const token = process.env.GATEWAY_TOKEN || '';
+      if (token) {
+        req.url = `/?token=${token}`;
+      }
+    }
   }
 
   // Everything else → OpenClaw
