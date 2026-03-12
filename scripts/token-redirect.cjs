@@ -215,12 +215,11 @@ http.Server.prototype.emit = function (event, ...args) {
         return origEmit.apply(this, [event, ...args]);
       }
     } else {
-      // Default mode: redirect GET / to /?token=xxx
+      // Default mode: rewrite URL to inject token (no redirect needed)
       if (req.method === 'GET' && !req.headers.upgrade) {
         if (pathname === '/' && !parsed.query.token) {
-          res.writeHead(302, { Location: `/?token=${GATEWAY_TOKEN}` });
-          res.end();
-          return true;
+          req.url = `/?token=${GATEWAY_TOKEN}`;
+          return origEmit.apply(this, [event, ...args]);
         }
       }
     }
