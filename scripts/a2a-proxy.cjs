@@ -123,13 +123,15 @@ async function pollOpenClawHealth() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const resp = await fetch(`http://127.0.0.1:${OPENCLAW_PORT}/`, {
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: 'manual'
     });
     clearTimeout(timeout);
+    const isUp = resp.ok || resp.status === 302;
     currentState = {
-      state: resp.ok ? 'idle' : 'error',
-      detail: resp.ok ? `${AGENT_NAME} is running` : `HTTP ${resp.status}`,
-      progress: resp.ok ? 100 : 0,
+      state: isUp ? 'idle' : 'error',
+      detail: isUp ? `${AGENT_NAME} is running` : `HTTP ${resp.status}`,
+      progress: isUp ? 100 : 0,
       updated_at: new Date().toISOString()
     };
   } catch (_) {
