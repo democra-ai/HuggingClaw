@@ -46,8 +46,9 @@ fi
 # ── Build artifacts check ───────────────────────────────────────────────────
 cd /app/openclaw
 echo "[entrypoint] Build artifacts check:"
-test -f dist/entry.js && echo "  OK dist/entry.js" || echo "  WARNING: dist/entry.js missing!"
-test -f dist/plugin-sdk/index.js && echo "  OK dist/plugin-sdk/index.js" || echo "  WARNING: dist/plugin-sdk/index.js missing!"
+test -f dist/entry.js && echo "  OK dist/entry.js" || echo "  INFO: dist/entry.js not found (pre-built image may use openclaw.mjs)"
+test -f openclaw.mjs && echo "  OK openclaw.mjs" || echo "  INFO: openclaw.mjs not found"
+test -f dist/plugin-sdk/index.js && echo "  OK dist/plugin-sdk/index.js" || echo "  INFO: dist/plugin-sdk/index.js not found"
 echo "  Extensions: $(ls extensions/ 2>/dev/null | wc -l | tr -d ' ') found"
 echo "  Global extensions link: $(readlink /home/node/.openclaw/extensions 2>/dev/null || echo 'NOT SET')"
 
