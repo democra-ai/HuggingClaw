@@ -24,6 +24,7 @@ WORKDIR /app
 # ── Layer 2 (node): Clone + Patch + Install + Build（合并为一层）─────────────
 COPY --chown=node:node patches /app/patches
 RUN echo "[build][layer2] Clone + install + build..." && START=$(date +%s) \
+  && export NODE_OPTIONS="--max-old-space-size=384" \
   && git clone --depth 1 https://github.com/openclaw/openclaw.git openclaw \
   && echo "[build] git clone: $(($(date +%s) - START))s" \
   && cd openclaw \
