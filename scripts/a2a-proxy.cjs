@@ -324,11 +324,15 @@ const server = http.createServer((req, res) => {
       return proxyRequest(req, res, OPENCLAW_PORT);
     }
   } else {
-    // Default mode: / goes directly to OpenClaw with token
-    if (pathname === '/' && req.method === 'GET' && !url.parse(req.url, true).query.token) {
-      const token = process.env.GATEWAY_TOKEN || '';
-      if (token) {
-        req.url = `/?token=${token}`;
+    // Default mode: redirect / to /?token=xxx so browser URL has the token
+    if (pathname === '/' && req.method === 'GET' && !req.headers.upgrade) {
+      const query = url.parse(req.url, true).query;
+      if (!query.token) {
+        const token = process.env.GATEWAY_TOKEN || '';
+        if (token) {
+          res.writeHead(302, { Location: `/?token=${token}` });
+          return res.end();
+        }
       }
     }
   }
