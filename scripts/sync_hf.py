@@ -600,16 +600,25 @@ class OpenClawFullSync:
             print(f"[SYNC] ERROR: App directory does not exist: {APP_DIR}")
             return None
 
-        # Debug: check if dist/entry.js exists
+        # Debug: check entry point (dist/entry.js or openclaw.mjs)
         entry_js = Path(APP_DIR) / "dist" / "entry.js"
-        if not entry_js.exists():
-            print(f"[SYNC] ERROR: dist/entry.js not found in {APP_DIR}")
+        openclaw_mjs = Path(APP_DIR) / "openclaw.mjs"
+        if entry_js.exists():
+            entry_cmd = ["node", "dist/entry.js", "gateway"]
+        elif openclaw_mjs.exists():
+            entry_cmd = ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+        else:
+            print(f"[SYNC] ERROR: No entry point found in {APP_DIR}")
+            print(f"[SYNC]   Checked: dist/entry.js, openclaw.mjs")
+            # List what's actually there
+            try:
+                print(f"[SYNC]   Contents: {list(Path(APP_DIR).iterdir())[:20]}")
+            except: pass
             return None
 
         # Use subprocess.run with direct output, no shell pipe
-        print(f"[SYNC] Launching: node dist/entry.js gateway")
+        print(f"[SYNC] Launching: {' '.join(entry_cmd)}")
         print(f"[SYNC] Working directory: {APP_DIR}")
-        print(f"[SYNC] Entry point exists: {entry_js}")
         print(f"[SYNC] Log file: {log_file}")
 
         # Open log file
@@ -649,7 +658,7 @@ class OpenClawFullSync:
             # Use Popen without shell to avoid pipe issues
             # auth disabled in config — no token needed
             process = subprocess.Popen(
-                ["node", "dist/entry.js", "gateway"],
+                entry_cmd,
                 cwd=str(APP_DIR),
                 stdout=subprocess.PIPE,  # Capture so we can log it
                 stderr=subprocess.STDOUT,
