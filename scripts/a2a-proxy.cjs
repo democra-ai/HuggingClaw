@@ -5,6 +5,7 @@
  *   /.well-known/*  → A2A gateway (port 18800)
  *   /a2a/*          → A2A gateway (port 18800)
  *   /api/state      → local state JSON (for Office frontend polling)
+ *   /agents         → merged agent list (OpenClaw + remote agents)
  *   everything else → OpenClaw (port 7861)
  */
 'use strict';
@@ -17,6 +18,16 @@ const OPENCLAW_PORT = 7861;
 const A2A_PORT = 18800;
 const AGENT_NAME = process.env.AGENT_NAME || 'Agent';
 
+// Remote agents to monitor (comma-separated URLs)
+// e.g. REMOTE_AGENTS=adam|Adam|https://tao-shen-huggingclaw-adam.hf.space,eve|Eve|https://tao-shen-huggingclaw-eve.hf.space
+const REMOTE_AGENTS_RAW = process.env.REMOTE_AGENTS || '';
+const remoteAgents = REMOTE_AGENTS_RAW
+  ? REMOTE_AGENTS_RAW.split(',').map(entry => {
+      const [id, name, baseUrl] = entry.trim().split('|');
+      return { id, name, baseUrl };
+    }).filter(a => a.id && a.name && a.baseUrl)
+  : [];
+
 let currentState = {
   state: 'syncing',
   detail: `${AGENT_NAME} is starting...`,
@@ -24,8 +35,90 @@ let currentState = {
   updated_at: new Date().toISOString()
 };
 
+// Track A2A activity — when an A2A message is being processed,
+// temporarily switch state to 'writing' so frontends can see it
+let a2aActiveRequests = 0;
+let a2aIdleTimer = null;
+const A2A_IDLE_DELAY = 8000; // stay "writing" for 8s after last A2A request ends
+
+function markA2AActive() {
+  a2aActiveRequests++;
+  if (a2aIdleTimer) { clearTimeout(a2aIdleTimer); a2aIdleTimer = null; }
+  currentState = {
+    state: 'writing',
+    detail: `${AGENT_NAME} is communicating...`,
+    progress: 100,
+    updated_at: new Date().toISOString()
+  };
+}
+
+function markA2ADone() {
+  a2aActiveRequests = Math.max(0, a2aActiveRequests - 1);
+  if (a2aActiveRequests === 0) {
+    if (a2aIdleTimer) clearTimeout(a2aIdleTimer);
+    a2aIdleTimer = setTimeout(() => {
+      a2aIdleTimer = null;
+      pollOpenClawHealth();
+    }, A2A_IDLE_DELAY);
+  }
+}
+
+// Remote agent states (polled periodically)
+const remoteAgentStates = new Map();
+
+async function pollRemoteAgent(agent) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(`${agent.baseUrl}/api/state`, {
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (resp.ok) {
+      const data = await resp.json();
+      remoteAgentStates.set(agent.id, {
+        agentId: agent.id,
+        name: agent.name,
+        state: data.state || 'idle',
+        detail: data.detail || '',
+        area: (data.state === 'idle') ? 'breakroom'
+            : (data.state === 'error') ? 'error'
+            : 'writing',
+        authStatus: 'approved',
+        updated_at: data.updated_at
+      });
+    }
+  } catch (_) {
+    // Keep last known state or mark as offline
+    if (!remoteAgentStates.has(agent.id)) {
+      remoteAgentStates.set(agent.id, {
+        agentId: agent.id,
+        name: agent.name,
+        state: 'syncing',
+        detail: `${agent.name} is starting...`,
+        area: 'door',
+        authStatus: 'approved'
+      });
+    }
+  }
+}
+
+function pollAllRemoteAgents() {
+  for (const agent of remoteAgents) {
+    pollRemoteAgent(agent);
+  }
+}
+
+if (remoteAgents.length > 0) {
+  setInterval(pollAllRemoteAgents, 5000);
+  pollAllRemoteAgents();
+  console.log(`[a2a-proxy] Monitoring ${remoteAgents.length} remote agent(s): ${remoteAgents.map(a => a.name).join(', ')}`);
+}
+
 // Poll OpenClaw health to track state
 async function pollOpenClawHealth() {
+  // Don't overwrite active A2A state
+  if (a2aActiveRequests > 0 || a2aIdleTimer) return;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
@@ -51,6 +144,34 @@ async function pollOpenClawHealth() {
 
 setInterval(pollOpenClawHealth, 5000);
 pollOpenClawHealth();
+
+// Fetch agents from OpenClaw and merge with remote agents
+async function getMergedAgents() {
+  let openClawAgents = [];
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(`http://127.0.0.1:${OPENCLAW_PORT}/agents`, {
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (resp.ok) {
+      openClawAgents = await resp.json();
+      if (!Array.isArray(openClawAgents)) openClawAgents = [];
+    }
+  } catch (_) {}
+
+  // Merge: OpenClaw agents + remote agents (deduplicate by agentId)
+  const existingIds = new Set(openClawAgents.map(a => a.agentId));
+  const merged = [...openClawAgents];
+  let slotIndex = openClawAgents.length;
+  for (const [id, agentState] of remoteAgentStates) {
+    if (!existingIds.has(id)) {
+      merged.push({ ...agentState, _slotIndex: slotIndex++ });
+    }
+  }
+  return merged;
+}
 
 function proxyRequest(req, res, targetPort) {
   const options = {
@@ -81,6 +202,11 @@ const server = http.createServer((req, res) => {
 
   // A2A routes → A2A gateway
   if (pathname.startsWith('/.well-known/') || pathname.startsWith('/a2a/')) {
+    // Track POST requests (message/send) as active communication
+    if (req.method === 'POST') {
+      markA2AActive();
+      res.on('finish', markA2ADone);
+    }
     return proxyRequest(req, res, A2A_PORT);
   }
 
@@ -91,6 +217,25 @@ const server = http.createServer((req, res) => {
       'Access-Control-Allow-Origin': '*'
     });
     return res.end(JSON.stringify(currentState));
+  }
+
+  // Agents endpoint — merge OpenClaw agents with remote agents
+  if (pathname === '/agents' && req.method === 'GET') {
+    getMergedAgents().then(agents => {
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(JSON.stringify(agents));
+    }).catch(() => {
+      // Fallback: just return remote agents
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(JSON.stringify([...remoteAgentStates.values()]));
+    });
+    return;
   }
 
   // Everything else → OpenClaw
