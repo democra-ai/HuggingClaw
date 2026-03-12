@@ -1,71 +1,46 @@
-# OpenClaw on Hugging Face Spaces — 优化构建（v2）
-# 优化点：node 用户构建（消除 chown）、合并 RUN 层（减少层开销）
+# OpenClaw on Hugging Face Spaces — Pre-built image (v3)
+# Uses official pre-built image to avoid 30+ minute builds on cpu-basic
+
+# ── Stage 1: Pull pre-built OpenClaw ─────────────────────────────────────────
+FROM ghcr.io/openclaw/openclaw:latest AS openclaw-prebuilt
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM node:22-bookworm
 SHELL ["/bin/bash", "-c"]
 
-# ── Layer 1 (root): 系统依赖 + 工具（全部合并为一层）─────────────────────────
-RUN echo "[build][layer1] System deps + tools..." && START=$(date +%s) \
+# ── System dependencies (root) ───────────────────────────────────────────────
+RUN echo "[build] Installing system deps..." && START=$(date +%s) \
   && apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates curl python3 python3-pip patch \
+  && apt-get install -y --no-install-recommends git ca-certificates curl python3 python3-pip \
   && rm -rf /var/lib/apt/lists/* \
   && pip3 install --no-cache-dir --break-system-packages huggingface_hub \
   && corepack enable \
-  && mkdir -p /app \
-  && chown node:node /app \
+  && mkdir -p /app/openclaw \
+  && chown -R node:node /app \
   && mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/credentials \
   && chown -R node:node /home/node \
-  && echo "[build][layer1] System deps + tools: $(($(date +%s) - START))s"
+  && echo "[build] System deps: $(($(date +%s) - START))s"
 
-# ── 切换到 node 用户（后续所有操作都以 node 身份，无需 chown）───────────────
+# ── Copy pre-built OpenClaw (skips clone + install + build entirely) ─────────
+COPY --from=openclaw-prebuilt --chown=node:node /app /app/openclaw
+
 USER node
 ENV HOME=/home/node
 WORKDIR /app
 
-# ── Layer 2a: Clone + Patch + Install (split to reduce peak memory) ──────────
-COPY --chown=node:node patches /app/patches
-RUN echo "[build][layer2a] Clone + install..." && START=$(date +%s) \
-  && git clone --depth 1 https://github.com/openclaw/openclaw.git openclaw \
-  && echo "[build] git clone: $(($(date +%s) - START))s" \
-  && cd openclaw \
-  && for p in /app/patches/*.patch; do \
-       if [ -f "$p" ]; then \
-         patch -p1 < "$p" \
-         && echo "[build] patch applied: $(basename $p)"; \
-       fi; \
-     done \
-  && T1=$(date +%s) \
-  && pnpm install --frozen-lockfile \
-  && echo "[build] pnpm install: $(($(date +%s) - T1))s" \
-  && pnpm store prune 2>/dev/null || true \
-  && echo "[build][layer2a] Clone+install: $(($(date +%s) - START))s"
-
-# ── Layer 2b: Build (separate layer so install memory is freed) ──────────────
-RUN cd /app/openclaw \
-  && echo "[build][layer2b] Building..." && START=$(date +%s) \
-  && NODE_OPTIONS="--max-old-space-size=512" pnpm build \
-  && echo "[build] pnpm build: $(($(date +%s) - START))s" \
-  && T3=$(date +%s) \
-  && NODE_OPTIONS="--max-old-space-size=512" OPENCLAW_PREFER_PNPM=1 pnpm ui:build \
-  && echo "[build] pnpm ui:build: $(($(date +%s) - T3))s" \
-  && test -f dist/entry.js && echo "[build] OK dist/entry.js" \
-  && test -f dist/plugin-sdk/index.js && echo "[build] OK dist/plugin-sdk/index.js" \
-  && test -d extensions/telegram && echo "[build] OK extensions/telegram" \
-  && test -d extensions/whatsapp && echo "[build] OK extensions/whatsapp" \
-  && test -d dist/control-ui && echo "[build] OK dist/control-ui" \
-  && mkdir -p /app/openclaw/empty-bundled-plugins \
-  && node -e "console.log(require('./package.json').version)" > /app/openclaw/.version \
-  && echo "[build] version: $(cat /app/openclaw/.version)" \
-  && echo "[build][layer2b] Build: $(($(date +%s) - START))s"
-
-# ── Layer 2.5: A2A Gateway Extension (optional, activated by A2A_PEERS env) ──
-RUN echo "[build][layer2.5] Cloning A2A gateway extension..." && START=$(date +%s) \
+# ── A2A Gateway Extension ───────────────────────────────────────────────────
+RUN echo "[build] Installing A2A gateway..." && START=$(date +%s) \
   && git clone --depth 1 https://github.com/win4r/openclaw-a2a-gateway.git /app/openclaw/extensions/a2a-gateway \
   && cd /app/openclaw/extensions/a2a-gateway \
   && npm install --production \
-  && echo "[build] A2A gateway installed: $(ls node_modules | wc -l) packages" \
-  && echo "[build][layer2.5] A2A gateway: $(($(date +%s) - START))s"
+  && echo "[build] A2A gateway: $(($(date +%s) - START))s"
 
-# ── Layer 3 (node): Scripts + Config + Frontend ──────────────────────────────
+# ── Prepare runtime dirs ────────────────────────────────────────────────────
+RUN mkdir -p /app/openclaw/empty-bundled-plugins \
+  && node -e "try{console.log(require('/app/openclaw/package.json').version)}catch(e){console.log('unknown')}" > /app/openclaw/.version \
+  && echo "[build] OpenClaw version: $(cat /app/openclaw/.version)"
+
+# ── Scripts + Config + Frontend ──────────────────────────────────────────────
 COPY --chown=node:node scripts /home/node/scripts
 COPY --chown=node:node frontend /home/node/frontend
 COPY --chown=node:node openclaw.json /home/node/scripts/openclaw.json.default
