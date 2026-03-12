@@ -153,6 +153,13 @@ const origEmit = http.Server.prototype.emit;
 http.Server.prototype.emit = function (event, ...args) {
   if (event === 'request') {
     const [req, res] = args;
+
+    // Only intercept on the main OpenClaw server (port 7860), not A2A gateway (18800)
+    const serverPort = this.address && this.address() && this.address().port;
+    if (serverPort && serverPort !== 7860) {
+      return origEmit.apply(this, [event, ...args]);
+    }
+
     const parsed = url.parse(req.url, true);
     const pathname = parsed.pathname;
 
