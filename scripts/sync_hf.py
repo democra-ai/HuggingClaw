@@ -563,26 +563,12 @@ class OpenClawFullSync:
             print("[SYNC] Config patched and saved.")
 
             # Fix paired devices scopes (OpenClaw 2026.2.19+ requires operator.write/read)
-            paired_path = Path(OPENCLAW_DIR) / "devices" / "paired.json"
-            required_scopes = {"operator.admin", "operator.approvals", "operator.pairing", "operator.write", "operator.read"}
-            if paired_path.exists():
-                try:
-                    with open(paired_path, "r") as f:
-                        devices = json.load(f)
-                    changed = False
-                    if isinstance(devices, list):
-                        for dev in devices:
-                            if isinstance(dev, dict) and "scopes" in dev:
-                                existing = set(dev["scopes"])
-                                if not required_scopes.issubset(existing):
-                                    dev["scopes"] = list(required_scopes | existing)
-                                    changed = True
-                    if changed:
-                        with open(paired_path, "w") as f:
-                            json.dump(devices, f, indent=2)
-                        print(f"[SYNC] Fixed paired device scopes: added operator.write/read")
-                except Exception as e:
-                    print(f"[SYNC] Warning: could not fix paired devices: {e}")
+            # Delete old paired devices to force fresh auto-pair with correct scopes
+            devices_dir = Path(OPENCLAW_DIR) / "devices"
+            if devices_dir.exists():
+                import shutil
+                shutil.rmtree(devices_dir, ignore_errors=True)
+                print("[SYNC] Deleted devices/ dir to force fresh auto-pair with operator.write/read scopes")
 
             # Verify write
             with open(config_path, "r") as f:

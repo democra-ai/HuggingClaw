@@ -31,6 +31,13 @@ def send_a2a(url, text):
     try:
         resp = requests.post(f"{url}/a2a/jsonrpc", json=payload, timeout=90)
         data = resp.json()
+        # Check if task failed
+        state = data.get("result", {}).get("status", {}).get("state", "")
+        if state == "failed":
+            parts = data.get("result", {}).get("status", {}).get("message", {}).get("parts", [])
+            err = parts[0].get("text", "") if parts else "unknown error"
+            print(f"[error] A2A task failed: {err}", file=sys.stderr)
+            return ""
         parts = data.get("result", {}).get("status", {}).get("message", {}).get("parts", [])
         for p in parts:
             if p.get("kind") == "text" or p.get("type") == "text":
