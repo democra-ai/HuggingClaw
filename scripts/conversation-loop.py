@@ -311,7 +311,32 @@ def action_check_health():
                     f"or config with [ACTION: write_file:dataset:.openclaw/openclaw.json]")
         if stage in ("BUILDING", "STARTING", "APP_STARTING"):
             return f"{CHILD_NAME} is starting up (stage: {stage}). Be patient."
-        return f"{CHILD_NAME} stage: {stage}. {'Running but API not responding.' if stage == 'RUNNING' else ''}"
+        if stage == "RUNNING":
+            # API not responding — fetch runtime logs to help agents diagnose
+            log_snippet = ""
+            try:
+                log_resp = requests.get(
+                    f"https://api.hf.space/v1/{CHILD_SPACE_ID}/logs/run",
+                    headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=10,
+                    stream=True)
+                if log_resp.ok:
+                    log_lines = []
+                    for line in log_resp.iter_lines(decode_unicode=True):
+                        if line and line.startswith("data:"):
+                            try:
+                                entry = json.loads(line[5:])
+                                log_lines.append(entry.get("data", "").strip())
+                            except:
+                                pass
+                        if len(log_lines) >= 30:
+                            break
+                    meaningful = [l for l in log_lines if l and len(l) > 5]
+                    if meaningful:
+                        log_snippet = "\nRUNTIME LOGS (last 10 lines):\n" + "\n".join(meaningful[-10:])
+            except:
+                pass
+            return f"{CHILD_NAME} stage: RUNNING. Running but API not responding.{log_snippet}"
+        return f"{CHILD_NAME} stage: {stage}."
     except Exception as e:
         return f"Cannot reach {CHILD_NAME}: {e}"
 
