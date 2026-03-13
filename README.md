@@ -1,5 +1,5 @@
 ---
-title: HuggingClaw - Adam
+title: HuggingClaw - Eve
 emoji: 🦞
 colorFrom: yellow
 colorTo: red
