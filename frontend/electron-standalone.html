@@ -4978,22 +4978,14 @@ function toggleBrokerPanel() {
             star.setVisible(true);
             star.anims.play('star_idle', true);
 
-            // Name label above Star character
-            window._starNameLabel = game.add.text(areas.breakroom.x, areas.breakroom.y - 140, '', {
+            // Name label above Star character — Star is always HuggingClaw
+            window._starNameLabel = game.add.text(areas.breakroom.x, areas.breakroom.y - 140, 'HuggingClaw', {
                 fontFamily: 'ArkPixel, monospace',
                 fontSize: '15px',
                 fill: '#ffffff',
                 stroke: '#000',
                 strokeThickness: 3
             }).setOrigin(0.5).setDepth(25);
-            // Update name when office state is fetched
-            function updateStarName() {
-                const name = (window.officeNameFromServer || '').replace(/'s Office$/i, '');
-                if (name && window._starNameLabel) window._starNameLabel.setText(name);
-            }
-            updateStarName();
-            // Re-check periodically (state fetch updates officeNameFromServer)
-            setInterval(updateStarName, 3000);
 
             // Sofa stays static when idle (no longer the main idle animation)
             sofa.anims.stop();
