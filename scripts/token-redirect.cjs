@@ -121,6 +121,7 @@ let currentState = {
   progress: 0, updated_at: new Date().toISOString()
 };
 let currentBubbleText = '';
+let chatLog = []; // {speaker, text, time}
 
 // Once OpenClaw starts listening, mark as idle
 setTimeout(() => {
@@ -218,6 +219,33 @@ http.Server.prototype.emit = function (event, ...args) {
           currentBubbleText = text || '';
           // Auto-clear bubble after 8 seconds
           setTimeout(() => { if (currentBubbleText === text) currentBubbleText = ''; }, 8000);
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return true;
+    }
+
+    // GET /api/chatlog → return conversation log
+    if (pathname === '/api/chatlog' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ messages: chatLog }));
+      return true;
+    }
+
+    // POST /api/chatlog → update conversation log (from orchestrator)
+    if (pathname === '/api/chatlog' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { messages } = JSON.parse(body);
+          if (Array.isArray(messages)) {
+            chatLog = messages.slice(-50); // keep last 50 messages
+          }
           res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
           res.end(JSON.stringify({ ok: true }));
         } catch (e) {

@@ -417,7 +417,41 @@
             max-width: none;
             justify-content: flex-start;
             margin-top: 20px;
+            flex-wrap: wrap;
         }
+        #chatlog-panel {
+            width: 100%;
+            max-height: 300px;
+            background: #1a1d27;
+            border: 4px solid #0e1119;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            font-family: 'ArkPixel', monospace;
+        }
+        #chatlog-title {
+            font-size: 14px;
+            color: #e0c97f;
+            margin-bottom: 8px;
+            text-align: center;
+        }
+        #chatlog-content {
+            flex: 1;
+            overflow-y: auto;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #d1d5db;
+        }
+        #chatlog-content .chat-msg {
+            margin-bottom: 4px;
+            padding: 2px 0;
+        }
+        #chatlog-content .chat-msg .chat-speaker {
+            font-weight: bold;
+        }
+        #chatlog-content .chat-msg .chat-speaker.adam { color: #f87171; }
+        #chatlog-content .chat-msg .chat-speaker.eve { color: #a78bfa; }
         #game-container {
             position: relative;
             border: 0;
@@ -1650,8 +1684,16 @@
             </div>
             </div>
         </div>
+
+        <!-- Chat Log 面板 -->
+        <div id="chatlog-panel">
+            <div id="chatlog-title">🦞 Adam ↔ Eve 对话</div>
+            <div id="chatlog-content">
+                <div style="color:#9ca3af;font-size:12px;text-align:center;padding:20px 0;">等待对话开始...</div>
+            </div>
+        </div>
     </div>
-    
+
     <div id="asset-highlight"></div>
     <div id="room-loading-overlay" aria-live="polite" aria-busy="true">
         <div class="room-loading-inner">
@@ -5491,6 +5533,26 @@ function toggleBrokerPanel() {
             if (s === 'research') return 'researching';
             return s;
         }
+
+        let lastChatlogLen = 0;
+        function fetchChatlog() {
+            fetch('/api/chatlog?t=' + Date.now(), { cache: 'no-store' })
+                .then(r => r.json())
+                .then(data => {
+                    const msgs = data.messages || [];
+                    if (msgs.length === lastChatlogLen) return;
+                    lastChatlogLen = msgs.length;
+                    const el = document.getElementById('chatlog-content');
+                    if (!el) return;
+                    el.innerHTML = msgs.map(m => {
+                        const cls = (m.speaker || '').toLowerCase();
+                        return `<div class="chat-msg"><span class="chat-speaker ${cls}">${m.speaker}:</span> ${m.text || ''}</div>`;
+                    }).join('');
+                    el.scrollTop = el.scrollHeight;
+                })
+                .catch(() => {});
+        }
+        setInterval(fetchChatlog, 5000);
 
         function fetchStatus() {
             return fetch('/status', { cache: 'no-store' })
