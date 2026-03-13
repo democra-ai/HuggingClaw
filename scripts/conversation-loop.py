@@ -1302,25 +1302,35 @@ if reply:
 
 time.sleep(20)
 
+smart_wait_count = 0
+MAX_SMART_WAIT_POLLS = 15  # ~5 min max wait, then let agents diagnose
+
 while True:
     # Smart wait: if Cain is BUILDING/APP_STARTING, skip LLM calls and just poll
     if child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
-        print(f"[WAIT] Cain is {child_state['stage']} — polling health instead of LLM call...")
-        check_and_clear_cooldown()
-        # Quick health check to update stage
-        try:
-            info = hf_api.space_info(CHILD_SPACE_ID)
-            new_stage = info.runtime.stage if info.runtime else "unknown"
-            if new_stage != child_state["stage"]:
-                print(f"[WAIT] Stage changed: {child_state['stage']} → {new_stage}")
-                child_state["stage"] = new_stage
-                child_state["alive"] = (new_stage == "RUNNING")
-            else:
-                print(f"[WAIT] Still {new_stage}... waiting 20s")
-        except Exception as e:
-            print(f"[WAIT] Health check error: {e}")
-        time.sleep(20)
-        continue
+        smart_wait_count += 1
+        if smart_wait_count > MAX_SMART_WAIT_POLLS:
+            print(f"[WAIT-TIMEOUT] {smart_wait_count} polls (~{smart_wait_count*20}s) on {child_state['stage']} — resuming agent turns to diagnose")
+            smart_wait_count = 0
+            # Fall through to normal agent turns
+        else:
+            print(f"[WAIT] Cain is {child_state['stage']} — polling health instead of LLM call... ({smart_wait_count}/{MAX_SMART_WAIT_POLLS})")
+            check_and_clear_cooldown()
+            # Quick health check to update stage
+            try:
+                info = hf_api.space_info(CHILD_SPACE_ID)
+                new_stage = info.runtime.stage if info.runtime else "unknown"
+                if new_stage != child_state["stage"]:
+                    print(f"[WAIT] Stage changed: {child_state['stage']} → {new_stage}")
+                    child_state["stage"] = new_stage
+                    child_state["alive"] = (new_stage == "RUNNING")
+                    smart_wait_count = 0  # reset on stage change
+                else:
+                    print(f"[WAIT] Still {new_stage}... waiting 20s")
+            except Exception as e:
+                print(f"[WAIT] Health check error: {e}")
+            time.sleep(20)
+            continue
 
     do_turn("Eve", "Adam", EVE_SPACE)
     time.sleep(20)  # longer pause — each turn does more work now
