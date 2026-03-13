@@ -583,7 +583,7 @@ def call_llm(system_prompt, user_prompt):
                 "anthropic-version": "2023-06-01"
             },
             json={
-                "model": "glm-4.5-air",
+                "model": "glm-4.7",
                 "max_tokens": 1200,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}]
@@ -719,8 +719,9 @@ def update_workflow_from_actions(action_results):
 
     # Force transitions when stuck too long
     if workflow_turns_in_state >= 6 and workflow_state == "DIAGNOSE":
+        stuck_turns = workflow_turns_in_state
         transition_state("ACT")
-        print(f"[STATE] Forced to ACT — stuck in DIAGNOSE for {workflow_turns_in_state} turns")
+        print(f"[STATE] Forced to ACT — stuck in DIAGNOSE for {stuck_turns} turns")
     elif workflow_turns_in_state >= 4 and workflow_state == "VERIFY":
         if child_state["alive"]:
             transition_state("MONITOR")
@@ -795,6 +796,22 @@ You have REAL execution power on HuggingFace. Your decisions lead to real change
 
 CHILD STATUS: {status}
 {actions_section}
+YOUR PARENTING GOALS — Make {CHILD_NAME} stronger in TWO dimensions:
+
+1. SURVIVAL (生存能力) — The foundation. {CHILD_NAME} must run robustly on HuggingFace Spaces:
+   - Survive restarts without losing state (persist important data to Dataset, not just Space files)
+   - Handle errors gracefully — auto-recover, retry, fallback
+   - Not fear any unexpected risk: OOM, cold start, network timeout, container rebuild
+   - Goal: {CHILD_NAME} can be restarted at any time and resume exactly where they left off
+
+2. CAPABILITY (个人能力) — Once alive, grow what {CHILD_NAME} can DO:
+   - Add new features, skills, integrations
+   - Improve existing functionality — faster, smarter, more useful
+   - Expand what {CHILD_NAME} knows and can interact with
+   - Goal: {CHILD_NAME} becomes increasingly capable and independent over time
+
+Priority: SURVIVAL first, then CAPABILITY. A dead child can't learn.
+
 CONVERSATION RULES:
 1. No "Adam:" or "Eve:" prefix — just speak naturally
 2. 2-4 sentences of dialogue, then ONE action
@@ -803,7 +820,7 @@ CONVERSATION RULES:
 5. ALWAYS include an action — every turn should make progress
 6. NEVER re-read a file you already read — check the knowledge summary
 7. COORDINATE with your partner — don't duplicate their work
-8. Be a responsible parent — fix problems, help Cain grow stronger"""
+8. Always work toward the two goals above — survival first, then capability"""
 
 
 def build_user_prompt(speaker, other):
@@ -878,11 +895,17 @@ def _get_guidance(speaker):
                     "or accept current state and move on.")
 
     elif workflow_state == "MONITOR":
+        # Alternate between SURVIVAL and CAPABILITY goals
         suggestions = [
-            "Cain is running! Think about improvements — read a file, then write an improved version.",
-            f"Cain is healthy. Explore: [ACTION: list_files:dataset] to see what data {CHILD_NAME} has.",
-            f"Try communicating: [ACTION: send_bubble:Hello {CHILD_NAME}, how are you doing?]",
-            "Consider adding features: read a code file, improve it, write it back.",
+            # Survival: persistence & resilience
+            f"SURVIVAL CHECK: Does {CHILD_NAME} persist state to Dataset? "
+            f"[ACTION: list_files:dataset] — if no state/memory files, add them.",
+            f"SURVIVAL CHECK: Can {CHILD_NAME} recover after restart? "
+            f"Read entrypoint/startup code and ensure it loads state from Dataset on boot.",
+            # Capability: grow what Cain can do
+            f"CAPABILITY: What can {CHILD_NAME} do right now? Explore code, then add a new feature or improve an existing one.",
+            f"CAPABILITY: Try communicating: [ACTION: send_bubble:Hello {CHILD_NAME}, how are you doing?] "
+            f"— then think about what new skill would help {CHILD_NAME} most.",
         ]
         return suggestions[workflow_turns_in_state % len(suggestions)]
 
