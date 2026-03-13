@@ -2377,7 +2377,7 @@
         async function loadMemo() {
             const memoDate = document.getElementById('memo-date');
             const memoContent = document.getElementById('memo-content');
-            
+            if (!memoContent) return;
             try {
                 const response = await fetch('/yesterday-memo?t=' + Date.now(), { cache: 'no-store' });
                 const data = await response.json();
@@ -5212,12 +5212,14 @@ function toggleBrokerPanel() {
             coordsToggle = document.getElementById('coords-toggle');
 
             // guest agent 将由 /agents 动态拉取并渲染到右侧访客列表
-            coordsToggle.addEventListener('click', () => {
-                showCoords = !showCoords;
-                coordsOverlay.style.display = showCoords ? 'block' : 'none';
-                coordsToggle.textContent = showCoords ? t('hideCoords') : t('showCoords');
-                coordsToggle.style.background = showCoords ? '#e94560' : '#333';
-            });
+            if (coordsToggle) {
+                coordsToggle.addEventListener('click', () => {
+                    showCoords = !showCoords;
+                    coordsOverlay.style.display = showCoords ? 'block' : 'none';
+                    coordsToggle.textContent = showCoords ? t('hideCoords') : t('showCoords');
+                    coordsToggle.style.background = showCoords ? '#e94560' : '#333';
+                });
+            }
 
             // 允许手机端“拖动/滑动”来移动视野（本质：移动 Phaser Camera）
             // iPhone 等触屏设备默认开启；桌面端默认关闭（可手动开）。
