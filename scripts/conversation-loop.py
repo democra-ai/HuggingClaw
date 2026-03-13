@@ -144,6 +144,7 @@ MAX_DELEGATE_DEPTH = 1        # Sub-agents cannot delegate further
 # Rebuild cooldown — prevent rapid write_file to Space that keeps resetting builds
 REBUILD_COOLDOWN_SECS = 360  # 6 minutes (builds typically finish in 3-5 min)
 last_rebuild_trigger_at = 0  # timestamp of last write_file to space
+_pending_cooldown = False  # defer cooldown activation until end of turn
 files_written_this_cycle = set()  # track files written since last RUNNING state
 
 def check_and_clear_cooldown():
@@ -346,12 +347,12 @@ def action_restart():
     if not child_state["created"]:
         return f"{CHILD_NAME} not born yet."
     try:
-        global last_rebuild_trigger_at
+        global _pending_cooldown
         hf_api.restart_space(CHILD_SPACE_ID)
         child_state["alive"] = False
         child_state["stage"] = "RESTARTING"
-        last_rebuild_trigger_at = time.time()
-        return f"{CHILD_NAME} is restarting. Will take a few minutes. Cooldown starts now (clears automatically when build finishes)."
+        _pending_cooldown = True  # deferred — activated after turn ends
+        return f"{CHILD_NAME} is restarting. Will take a few minutes. Cooldown starts after this turn."
     except Exception as e:
         return f"Restart failed: {e}"
 
@@ -409,7 +410,7 @@ def action_write_file(target, path, content):
             return f"Error: invalid JSON in config file. Please fix the content."
 
     try:
-        global last_rebuild_trigger_at
+        global _pending_cooldown
         hf_api.upload_file(
             path_or_fileobj=io.BytesIO(content.encode()),
             path_in_repo=path,
@@ -417,8 +418,8 @@ def action_write_file(target, path, content):
         )
         rebuild_note = ""
         if target == "space":
-            last_rebuild_trigger_at = time.time()
-            rebuild_note = " ⚠️ This triggers a Space rebuild! Cooldown starts now (auto-clears when build finishes)."
+            _pending_cooldown = True  # deferred — activated after turn ends
+            rebuild_note = " ⚠️ This triggers a Space rebuild! Cooldown starts after this turn."
         return f"✓ Wrote {len(content)} bytes to {CHILD_NAME}'s {target}:{path}{rebuild_note}"
     except Exception as e:
         return f"Error writing {target}:{path}: {e}"
@@ -429,15 +430,15 @@ def action_delete_file(target, path):
     repo_type = "space" if target == "space" else "dataset"
     repo_id = CHILD_SPACE_ID if target == "space" else CHILD_DATASET_ID
     try:
-        global last_rebuild_trigger_at
+        global _pending_cooldown
         hf_api.delete_file(
             path_in_repo=path,
             repo_id=repo_id, repo_type=repo_type,
         )
         rebuild_note = ""
         if target == "space":
-            last_rebuild_trigger_at = time.time()
-            rebuild_note = " ⚠️ This triggers a Space rebuild! Cooldown starts now."
+            _pending_cooldown = True  # deferred — activated after turn ends
+            rebuild_note = " ⚠️ This triggers a Space rebuild! Cooldown starts after this turn."
         return f"✓ Deleted {target}:{path}{rebuild_note}"
     except Exception as e:
         return f"Error deleting {target}:{path}: {e}"
@@ -655,7 +656,7 @@ def parse_and_execute_actions(raw_text, depth=0):
             break
 
         # Rebuild cooldown — prevent writing to Space repo too soon after last rebuild trigger
-        if name in ("write_file", "set_env", "set_secret", "restart") and last_rebuild_trigger_at > 0:
+        if name in ("write_file", "set_env", "set_secret", "restart", "delete_file") and last_rebuild_trigger_at > 0:
             check_and_clear_cooldown()  # may clear cooldown early if build done
             elapsed = time.time() - last_rebuild_trigger_at if last_rebuild_trigger_at > 0 else 9999
             if elapsed < REBUILD_COOLDOWN_SECS:
@@ -747,7 +748,7 @@ def parse_and_execute_actions(raw_text, depth=0):
                 break
 
             # Rebuild cooldown (emoji parser)
-            if name in ("write_file", "set_env", "set_secret", "restart") and last_rebuild_trigger_at > 0:
+            if name in ("write_file", "set_env", "set_secret", "restart", "delete_file") and last_rebuild_trigger_at > 0:
                 elapsed = time.time() - last_rebuild_trigger_at
                 if elapsed < REBUILD_COOLDOWN_SECS:
                     remaining = int(REBUILD_COOLDOWN_SECS - elapsed)
@@ -837,6 +838,15 @@ def parse_and_execute_actions(raw_text, depth=0):
                         results.append({"action": d["action_str"],
                                        "result": f"Sub-agent failed: {e}"})
                         print(f"[DELEGATE] ✗ Failed: {d['task'][:60]} — {e}")
+
+    # 5. Activate deferred cooldown AFTER all actions in this turn complete
+    #    This allows agents to batch multiple file ops (e.g., write app.py + requirements.txt)
+    #    in a single turn without the first write blocking the second.
+    global last_rebuild_trigger_at, _pending_cooldown
+    if _pending_cooldown and depth == 0:  # only at top-level, not inside sub-agents
+        last_rebuild_trigger_at = time.time()
+        _pending_cooldown = False
+        print(f"[COOLDOWN] Activated — Space was modified this turn. Next write blocked for {REBUILD_COOLDOWN_SECS}s (or until build finishes).")
 
     # Clean the text: remove action tags, content blocks, and emoji actions
     clean = re.sub(r'\[(?:ACTION|Action|action|操作|动作)\s*[:：][^\]]*\]', '', raw_text)
