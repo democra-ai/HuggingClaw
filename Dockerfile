@@ -1,4 +1,4 @@
-# OpenClaw on Hugging Face Spaces — Pre-built image (v3.4)
+# OpenClaw on Hugging Face Spaces — Pre-built image (v3.5)
 # Uses official pre-built image to avoid 30+ minute builds on cpu-basic
 
 # ── Stage 1: Pull pre-built OpenClaw ─────────────────────────────────────────
