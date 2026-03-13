@@ -742,22 +742,28 @@ def format_action_history():
 # Simple workflow state: BIRTH / WAITING / ACTIVE
 workflow_state = "BIRTH" if not child_state["created"] else "ACTIVE"
 
+# Discussion loop detector — tracks consecutive discussion-only turns (no tasks assigned)
+_discussion_loop_count = 0  # how many turns in a row with no [TASK] while CC is IDLE and child is alive
+
 
 def parse_and_execute_turn(raw_text, ctx):
     """Parse LLM output. Route [TASK] to Claude Code, handle few escape-hatch actions."""
-    global _pending_cooldown, last_rebuild_trigger_at, last_claude_code_result
+    global _pending_cooldown, last_rebuild_trigger_at, last_claude_code_result, _discussion_loop_count
     results = []
+    task_assigned = False
 
     # 1. Handle create_child (BIRTH state only)
     if "[ACTION: create_child]" in raw_text or "[ACTION:create_child]" in raw_text:
         result = action_create_child()
         results.append({"action": "create_child", "result": result})
-        return raw_text, results
+        task_assigned = True
+        return raw_text, results, task_assigned
 
     # 2. Handle [TASK]...[/TASK] → Claude Code
     task_match = re.search(r'\[TASK\](.*?)\[/TASK\]', raw_text, re.DOTALL)
     if task_match:
         task_desc = task_match.group(1).strip()
+        task_assigned = True
         if not task_desc:
             results.append({"action": "task", "result": "Empty task description."})
         elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
@@ -800,11 +806,24 @@ def parse_and_execute_turn(raw_text, ctx):
         _pending_cooldown = False
         print(f"[COOLDOWN] Rebuild cooldown activated ({REBUILD_COOLDOWN_SECS}s)")
 
+    # Update discussion loop counter
+    cc_busy = cc_status["running"]
+    child_alive = child_state["alive"] or child_state["stage"] == "RUNNING"
+    if task_assigned or not cc_busy or not child_alive:
+        # Reset counter if task assigned, CC busy, or child not alive
+        if _discussion_loop_count > 0:
+            print(f"[LOOP-DISCUSS] Reset (task assigned or CC busy or child not alive)")
+        _discussion_loop_count = 0
+    else:
+        _discussion_loop_count += 1
+        if _discussion_loop_count >= 2:
+            print(f"[LOOP-DISCUSS] WARNING: {_discussion_loop_count} consecutive discussion-only turns with CC IDLE and child alive!")
+
     # Clean text for display
     clean = re.sub(r'\[TASK\].*?\[/TASK\]', '', raw_text, flags=re.DOTALL)
     clean = re.sub(r'\[ACTION:[^\]]*\]', '', clean).strip()
 
-    return clean, results
+    return clean, results, task_assigned
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -963,6 +982,13 @@ def build_user_prompt(speaker, other, ctx):
     else:
         parts.append(f"\nAnalyze the situation and write a [TASK] if CC is idle.")
 
+    # Discussion loop warning
+    if _discussion_loop_count >= 2:
+        parts.append(f"\n⚠️⚠️⚠️ CRITICAL: You have been DISCUSSING for {_discussion_loop_count} turns without assigning any tasks!")
+        parts.append(f"Claude Code is IDLE and {CHILD_NAME} is ALIVE. This is NOT acceptable.")
+        parts.append(f"YOU MUST write a [TASK]...[/TASK] block NOW. Do NOT write another discussion response.")
+        parts.append(f"Examples of tasks: 'Check the logs', 'Read config.py', 'Add a feature', 'Fix a bug', etc.")
+
     parts.append(f"\nYou are {speaker}. Your partner is {other}. Respond now.")
     parts.append("English first, then --- separator, then Chinese translation.")
 
@@ -999,7 +1025,7 @@ else:
 _current_speaker = "Adam"
 reply = call_llm(build_system_prompt("Adam"), f"{opening}\n\n{format_context(ctx)}\n\nEnglish first, then --- separator, then Chinese translation.")
 if reply:
-    clean, actions = parse_and_execute_turn(reply, ctx)
+    clean, actions, _ = parse_and_execute_turn(reply, ctx)
     last_action_results = actions
     if actions:
         record_actions("Adam", 0, actions)
@@ -1046,7 +1072,7 @@ def do_turn(speaker, other, space_url):
         print(f"[{speaker}] (no response)")
         return False
 
-    clean_text, action_results = parse_and_execute_turn(raw_reply, ctx)
+    clean_text, action_results, _ = parse_and_execute_turn(raw_reply, ctx)
     elapsed = time.time() - t0
     last_action_results = action_results
     if action_results:
