@@ -5526,6 +5526,13 @@ function toggleBrokerPanel() {
         let chatLang = localStorage.getItem('chatLang') || 'en';
         // Sync uiLang to chatLang on init (single language toggle now)
         uiLang = chatLang;
+        // Sync toggle button state on load
+        requestAnimationFrame(() => {
+            const enBtn = document.getElementById('chatlog-lang-en');
+            const zhBtn = document.getElementById('chatlog-lang-zh');
+            if (enBtn) enBtn.style.opacity = chatLang === 'en' ? '1' : '0.4';
+            if (zhBtn) zhBtn.style.opacity = chatLang === 'zh' ? '1' : '0.4';
+        });
         let chatlogCache = [];
         function setChatLang(lang) {
             chatLang = lang;
