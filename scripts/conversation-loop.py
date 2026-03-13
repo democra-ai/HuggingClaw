@@ -1304,14 +1304,18 @@ time.sleep(20)
 
 smart_wait_count = 0
 MAX_SMART_WAIT_POLLS = 15  # ~5 min max wait, then let agents diagnose
+GRACE_TURNS_AFTER_TIMEOUT = 3  # give agents 3 full Eve+Adam cycles after timeout
+grace_turns_remaining = 0
 
 while True:
     # Smart wait: if Cain is BUILDING/APP_STARTING, skip LLM calls and just poll
-    if child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
+    # But NOT during grace period after timeout — agents need consecutive turns to diagnose & fix
+    if child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING") and grace_turns_remaining <= 0:
         smart_wait_count += 1
         if smart_wait_count > MAX_SMART_WAIT_POLLS:
-            print(f"[WAIT-TIMEOUT] {smart_wait_count} polls (~{smart_wait_count*20}s) on {child_state['stage']} — resuming agent turns to diagnose")
+            print(f"[WAIT-TIMEOUT] {smart_wait_count} polls (~{smart_wait_count*20}s) on {child_state['stage']} — resuming {GRACE_TURNS_AFTER_TIMEOUT} agent turn pairs to diagnose")
             smart_wait_count = 0
+            grace_turns_remaining = GRACE_TURNS_AFTER_TIMEOUT
             # Fall through to normal agent turns
         else:
             print(f"[WAIT] Cain is {child_state['stage']} — polling health instead of LLM call... ({smart_wait_count}/{MAX_SMART_WAIT_POLLS})")
@@ -1332,11 +1336,15 @@ while True:
             time.sleep(20)
             continue
 
+    if grace_turns_remaining > 0:
+        print(f"[GRACE] Agent grace period: {grace_turns_remaining} turn pair(s) remaining (Cain: {child_state['stage']})")
+        grace_turns_remaining -= 1
+
     do_turn("Eve", "Adam", EVE_SPACE)
     time.sleep(20)  # longer pause — each turn does more work now
 
-    # Check if we just triggered a build — skip Adam's turn if so
-    if child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
+    # Check if we just triggered a build — skip Adam's turn ONLY if not in grace period
+    if child_state["stage"] in ("BUILDING", "RESTARTING") and grace_turns_remaining <= 0:
         print(f"[SKIP] Cain entered {child_state['stage']} — skipping Adam's turn to avoid wasted LLM call")
         time.sleep(10)
         continue
