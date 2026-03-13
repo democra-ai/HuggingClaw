@@ -710,6 +710,33 @@ last_action_results = []
 turn_count = 0
 _current_speaker = "Adam"
 
+# Accumulated action history — prevents agents from repeating the same actions
+action_history = []  # list of {"turn": int, "speaker": str, "action": str, "result": str}
+MAX_ACTION_HISTORY = 20
+
+def record_actions(speaker, turn_num, action_results):
+    """Record actions to history so agents don't repeat them."""
+    for ar in action_results:
+        action_history.append({
+            "turn": turn_num,
+            "speaker": speaker,
+            "action": ar["action"],
+            "result": ar["result"][:200],
+        })
+    # Trim old history
+    while len(action_history) > MAX_ACTION_HISTORY:
+        action_history.pop(0)
+
+
+def format_action_history():
+    """Format action history for injection into context."""
+    if not action_history:
+        return ""
+    lines = ["=== ACTIONS ALREADY DONE (do NOT repeat these) ==="]
+    for ah in action_history:
+        lines.append(f"  Turn #{ah['turn']} {ah['speaker']}: {ah['action']} → {ah['result'][:120]}")
+    return "\n".join(lines)
+
 # Simple workflow state: BIRTH / WAITING / ACTIVE
 workflow_state = "BIRTH" if not child_state["created"] else "ACTIVE"
 
@@ -827,6 +854,11 @@ IMPORTANT KNOWLEDGE — HuggingFace Spaces CONFIG_ERROR:
 - Fix: [ACTION: delete_env:COLLIDING_KEY] then [ACTION: restart].
 - Look for ⚠️ COLLISION DETECTED in the context.
 
+CRITICAL RULE — NO REPEATED ACTIONS:
+- Check the "ACTIONS ALREADY DONE" section in context before acting.
+- NEVER repeat an action that was already done (restart, delete_env, etc.)
+- If a prior action didn't solve the problem, try a DIFFERENT approach.
+
 AVAILABLE ACTIONS:
   [TASK]
   Detailed task for Claude Code. Include: what's wrong, which files, what the fix should be.
@@ -863,6 +895,11 @@ def build_user_prompt(speaker, other, ctx):
         parts.append("=== RECENT CONVERSATION ===")
         for h in history[-8:]:
             parts.append(f"{h['speaker']}: {h['text'][:300]}")
+
+    # Action history — what's already been done (prevents repetition)
+    ah_text = format_action_history()
+    if ah_text:
+        parts.append(f"\n{ah_text}")
 
     # Last action results (non-CC)
     if last_action_results:
@@ -933,6 +970,8 @@ reply = call_llm(build_system_prompt("Adam"), f"{opening}\n\n{format_context(ctx
 if reply:
     clean, actions = parse_and_execute_turn(reply, ctx)
     last_action_results = actions
+    if actions:
+        record_actions("Adam", 0, actions)
     en, zh = parse_bilingual(clean)
     en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
     print(f"[Adam/EN] {en}")
@@ -979,6 +1018,8 @@ def do_turn(speaker, other, space_url):
     clean_text, action_results = parse_and_execute_turn(raw_reply, ctx)
     elapsed = time.time() - t0
     last_action_results = action_results
+    if action_results:
+        record_actions(speaker, turn_count, action_results)
 
     en, zh = parse_bilingual(clean_text)
     en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
