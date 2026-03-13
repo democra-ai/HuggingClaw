@@ -366,7 +366,7 @@ def action_claude_code(task):
     print(f"[CLAUDE-CODE] Running: {task[:200]}...")
     try:
         proc = subprocess.Popen(
-            ["claude", "-p", task, "--output-format", "text", "--dangerouslySkipPermissions"],
+            ["claude", "-p", task, "--output-format", "text", "--dangerously-skip-permissions"],
             cwd=CLAUDE_WORK_DIR,
             env=env,
             stdout=subprocess.PIPE,
