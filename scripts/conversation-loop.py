@@ -565,6 +565,7 @@ def parse_and_execute_actions(raw_text, depth=0):
     """Parse [ACTION: ...] from LLM output. Execute. Return (clean_text, results).
     Multi-action: up to MAX_ACTIONS_PER_TURN actions per turn.
     Delegate actions are collected and executed in parallel at the end."""
+    global last_rebuild_trigger_at, _pending_cooldown
     results = []
     executed = set()  # Deduplicate
     pending_delegates = []  # Collect delegate tasks for parallel execution
@@ -842,7 +843,6 @@ def parse_and_execute_actions(raw_text, depth=0):
     # 5. Activate deferred cooldown AFTER all actions in this turn complete
     #    This allows agents to batch multiple file ops (e.g., write app.py + requirements.txt)
     #    in a single turn without the first write blocking the second.
-    global last_rebuild_trigger_at, _pending_cooldown
     if _pending_cooldown and depth == 0:  # only at top-level, not inside sub-agents
         last_rebuild_trigger_at = time.time()
         _pending_cooldown = False
