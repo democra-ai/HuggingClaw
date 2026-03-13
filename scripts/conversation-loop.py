@@ -22,15 +22,17 @@ then delegate ALL coding work to Claude Code CLI.
 # ║  │ Cain Space  │               │ (z.ai backend) │                ║
 # ║  └─────────────┘               └────────────────┘                ║
 # ║                                                                    ║
-# ║  Flow per turn:                                                    ║
-# ║  1. Auto gather_context() — health, env, errors, files            ║
-# ║  2. GLM discusses situation with partner (2-3 sentences)           ║
-# ║  3. GLM outputs [TASK]...[/TASK] for Claude Code                  ║
-# ║  4. Claude Code clones repo, analyzes, fixes, pushes              ║
-# ║  5. Results fed back for next turn                                 ║
+# ║  Parallel flow:                                                     ║
+# ║  DISCUSSION THREAD (every 15s):                                    ║
+# ║    Adam → Eve → Adam → Eve → ... (continuous)                     ║
+# ║    Each turn sees CC's live output + Cain's state                  ║
+# ║  CC WORKER THREAD (background):                                    ║
+# ║    Receives [TASK] → clone → analyze → fix → push                 ║
+# ║    Streams output to shared buffer for agents to discuss           ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 """
-import json, time, re, requests, sys, os, io, subprocess
+import json, time, re, requests, sys, os, io, subprocess, threading, datetime
+from collections import deque
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -311,6 +313,7 @@ def action_send_bubble(text):
 
 CLAUDE_WORK_DIR = "/tmp/claude-workspace"
 CLAUDE_TIMEOUT = 300  # 5 minutes
+TURN_INTERVAL = 15    # seconds between turns — fast enough for lively discussion
 
 def action_claude_code(task):
     """Run Claude Code CLI to autonomously complete a coding task on Cain's Space."""
@@ -377,6 +380,7 @@ def action_claude_code(task):
             line = line.rstrip('\n')
             print(f"  [CC] {line}")
             output_lines.append(line)
+            cc_live_lines.append(line)
             if time.time() > deadline:
                 proc.kill()
                 output_lines.append("(killed: timeout)")
@@ -418,6 +422,64 @@ def action_claude_code(task):
         output = output[:3000] + f"\n... (truncated, {len(output)} chars total)"
 
     return f"=== Claude Code Output ===\n{output}\n\n=== Changes ===\n{push_result}"
+
+
+# ── Background Claude Code Worker ────────────────────────────────────────────
+
+cc_live_lines = deque(maxlen=30)    # rolling window of CC output lines
+cc_status = {"running": False, "task": "", "result": "", "assigned_by": "", "started": 0.0}
+cc_lock = threading.Lock()
+
+
+def cc_submit_task(task, assigned_by, ctx):
+    """Submit a task to Claude Code in background. Non-blocking."""
+    with cc_lock:
+        if cc_status["running"]:
+            return "BUSY: Claude Code is already working on a task. Wait for it to finish."
+        cc_status["running"] = True
+        cc_status["task"] = task[:200]
+        cc_status["result"] = ""
+        cc_status["assigned_by"] = assigned_by
+        cc_status["started"] = time.time()
+        cc_live_lines.clear()
+
+    enriched = enrich_task_with_context(task, ctx)
+    print(f"[TASK] {assigned_by} assigned to Claude Code ({len(enriched)} chars)...")
+
+    def worker():
+        result = action_claude_code(enriched)
+        with cc_lock:
+            cc_status["running"] = False
+            cc_status["result"] = result
+        print(f"[CC-DONE] Task from {assigned_by} finished ({len(result)} chars)")
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    return "Task submitted to Claude Code (running in background)."
+
+
+def cc_get_live_status():
+    """Get CC's current status and recent output for agents to discuss."""
+    with cc_lock:
+        if cc_status["running"]:
+            elapsed = int(time.time() - cc_status["started"])
+            lines = list(cc_live_lines)
+            recent = "\n".join(lines[-10:]) if lines else "(no output yet)"
+            return (f"🔨 Claude Code is WORKING (assigned by {cc_status['assigned_by']}, {elapsed}s ago)\n"
+                    f"Task: {cc_status['task']}\n"
+                    f"Recent output:\n{recent}")
+        elif cc_status["result"]:
+            return (f"✅ Claude Code FINISHED (assigned by {cc_status['assigned_by']})\n"
+                    f"Result:\n{cc_status['result'][:1500]}")
+        else:
+            return "💤 Claude Code is IDLE — no active task."
+
+
+# Patch action_claude_code to also feed cc_live_lines
+_orig_cc_print = print
+def _cc_line_hook(line):
+    """Called for each [CC] output line to feed the live buffer."""
+    cc_live_lines.append(line)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -634,7 +696,7 @@ history = []
 MAX_HISTORY = 24
 last_action_results = []
 turn_count = 0
-last_claude_code_result = ""
+_current_speaker = "Adam"
 
 # Simple workflow state: BIRTH / WAITING / ACTIVE
 workflow_state = "BIRTH" if not child_state["created"] else "ACTIVE"
@@ -670,13 +732,8 @@ def parse_and_execute_turn(raw_text, ctx):
                     last_rebuild_trigger_at = 0
 
             if not results:  # not blocked
-                enriched = enrich_task_with_context(task_desc, ctx)
-                print(f"[TASK] Sending to Claude Code ({len(enriched)} chars)...")
-                result = action_claude_code(enriched)
-                results.append({"action": "claude_code", "result": result})
-                last_claude_code_result = result
-                # Clear context cache since files may have changed
-                _context_cache.clear()
+                submit_result = cc_submit_task(task_desc, _current_speaker, ctx)
+                results.append({"action": "claude_code", "result": submit_result})
 
     # 3. Handle [ACTION: restart] (escape hatch)
     if re.search(r'\[ACTION:\s*restart\]', raw_text):
@@ -738,12 +795,20 @@ You think about growth: is the code clean? Are there edge cases? What can be imp
     return f"""{role_desc.get(speaker, role_desc["Adam"])}
 
 You and your partner are parents of {CHILD_NAME}, working together to raise it.
-Claude Code is your engineer — it clones {CHILD_NAME}'s code, analyzes, fixes, and pushes changes.
-You do NOT code yourself. You discuss the situation with your partner, then assign Claude Code a task.
+Claude Code is your engineer — it runs in the BACKGROUND while you keep discussing.
+You do NOT code yourself. You discuss, observe Claude Code's progress, and assign new tasks.
+
+HOW IT WORKS:
+- Claude Code runs tasks IN THE BACKGROUND. You see its live output in the context.
+- While Claude Code works, you keep discussing with your partner.
+- When Claude Code finishes, review its results and assign the next task.
+- If Claude Code is IDLE, assign a new [TASK].
+- If Claude Code is BUSY, discuss its progress and plan what to do next.
 
 WORKFLOW EACH TURN:
-1. Discuss with your partner (2-3 sentences) — analyze the situation, respond to their observations
-2. Then write a [TASK]...[/TASK] block assigning work to Claude Code — MANDATORY every turn
+1. Discuss with your partner (2-3 sentences) — react to context, CC output, partner's observations
+2. If Claude Code is IDLE: write a [TASK]...[/TASK] to assign new work
+3. If Claude Code is BUSY: discuss its progress, no [TASK] needed
 
 IMPORTANT KNOWLEDGE — HuggingFace Spaces CONFIG_ERROR:
 - "Collision on variables and secrets names" = env VARIABLE and SECRET with SAME NAME.
@@ -769,12 +834,12 @@ HF SPACES TECHNICAL NOTES:
 - If sdk: gradio in README.md, Dockerfile is IGNORED. Use sdk: docker.
 
 OUTPUT FORMAT:
-1. Discussion with partner (2-3 sentences analyzing the situation)
-2. A [TASK]...[/TASK] block — MANDATORY every turn
-3. Optional [ACTION: ...] if needed
-4. English first, then --- separator, then Chinese translation
-5. Be SPECIFIC in tasks — error messages, file names, expected behavior
-6. If {CHILD_NAME} is BUILDING/RESTARTING, assign a review/planning/analysis task"""
+1. Discussion with partner (2-3 sentences) — respond to partner, react to CC output
+2. If CC is IDLE: a [TASK]...[/TASK] block to assign new work
+3. If CC is BUSY: no [TASK] needed, just discuss its progress
+4. Optional [ACTION: ...] if needed
+5. English first, then --- separator, then Chinese translation
+6. Be SPECIFIC in tasks — error messages, file names, expected behavior"""
 
 
 def build_user_prompt(speaker, other, ctx):
@@ -787,30 +852,33 @@ def build_user_prompt(speaker, other, ctx):
         for h in history[-8:]:
             parts.append(f"{h['speaker']}: {h['text'][:300]}")
 
-    # Last action results
+    # Last action results (non-CC)
     if last_action_results:
-        parts.append("\n=== LAST ACTION RESULTS ===")
-        for ar in last_action_results:
-            parts.append(f"[{ar['action']}]: {ar['result'][:500]}")
+        non_cc = [ar for ar in last_action_results if ar['action'] != 'claude_code']
+        if non_cc:
+            parts.append("\n=== LAST ACTION RESULTS ===")
+            for ar in non_cc:
+                parts.append(f"[{ar['action']}]: {ar['result'][:500]}")
 
-    # Last Claude Code result (if any)
-    if last_claude_code_result:
-        parts.append(f"\n=== LAST CLAUDE CODE RESULT ===\n{last_claude_code_result[:1500]}")
+    # Claude Code live status (async)
+    parts.append(f"\n=== CLAUDE CODE STATUS ===\n{cc_get_live_status()}")
 
     # Auto-gathered context
     parts.append(f"\n=== {CHILD_NAME}'S CURRENT STATE (auto-gathered) ===")
     parts.append(format_context(ctx))
 
-    # Guidance based on state
-    if child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
-        parts.append(f"\n⏳ {CHILD_NAME} is {child_state['stage']}. Just discuss what you'll check next. Do NOT write a [TASK].")
+    # Guidance based on CC status + child state
+    cc_busy = cc_status["running"]
+    if cc_busy:
+        parts.append(f"\n🔨 Claude Code is WORKING. Discuss its progress with your partner. No [TASK] needed now.")
+    elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
+        parts.append(f"\n⏳ {CHILD_NAME} is {child_state['stage']}. Discuss what to check next. Assign a review [TASK] if CC is idle.")
     elif child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
-        parts.append(f"\n🚨 {CHILD_NAME} has {child_state['stage']}! Analyze the context above and write a [TASK] for Claude Code to fix it.")
-        parts.append("Be SPECIFIC: include the error message, relevant files, and what the fix should do.")
+        parts.append(f"\n🚨 {CHILD_NAME} has {child_state['stage']}! Write a [TASK] for Claude Code to fix it.")
     elif child_state["alive"]:
-        parts.append(f"\n✅ {CHILD_NAME} is alive! Write a [TASK] for Claude Code to improve {CHILD_NAME} (add features, harden survival, etc).")
+        parts.append(f"\n✅ {CHILD_NAME} is alive and CC is idle. Write a [TASK] to improve {CHILD_NAME}.")
     else:
-        parts.append(f"\nAnalyze the situation and decide what to do.")
+        parts.append(f"\nAnalyze the situation and write a [TASK] if CC is idle.")
 
     parts.append(f"\nYou are {speaker}. Your partner is {other}. Respond now.")
     parts.append("English first, then --- separator, then Chinese translation.")
@@ -845,6 +913,7 @@ if child_state["created"]:
 else:
     opening = f"You and Eve need to create your first child. Use [ACTION: create_child] to bring them to life."
 
+_current_speaker = "Adam"
 reply = call_llm(build_system_prompt("Adam"), f"{opening}\n\n{format_context(ctx)}\n\nEnglish first, then --- separator, then Chinese translation.")
 if reply:
     clean, actions = parse_and_execute_turn(reply, ctx)
@@ -856,10 +925,6 @@ if reply:
         print(f"[Adam/ZH] {zh}")
     for ar in actions:
         print(f"[Adam/DID] {ar['action']}")
-        if ar['action'] == 'claude_code':
-            result_preview = ar['result'][:800].replace('\n', '\n  ')
-            print(f"  [CC-RESULT] {result_preview}")
-    import datetime
     ts = datetime.datetime.utcnow().strftime("%H:%M")
     entry = {"speaker": "Adam", "time": ts, "text": en, "text_zh": zh}
     if actions:
@@ -871,16 +936,21 @@ if reply:
     post_chatlog(history)
     persist_turn("Adam", 0, en, zh, actions, workflow_state, child_state["stage"])
 
-time.sleep(20)
+time.sleep(TURN_INTERVAL)
 
 
 def do_turn(speaker, other, space_url):
-    """Execute one conversation turn."""
-    global last_action_results, turn_count, last_claude_code_result
+    """Execute one conversation turn (non-blocking — CC runs in background)."""
+    global last_action_results, turn_count, _current_speaker
     turn_count += 1
+    _current_speaker = speaker
 
-    # Auto-gather context
+    # Auto-gather context (lightweight)
     ctx = gather_context()
+
+    # Check if CC just finished — clear result after agents see it once
+    with cc_lock:
+        cc_just_finished = (not cc_status["running"] and cc_status["result"])
 
     system = build_system_prompt(speaker)
     user = build_user_prompt(speaker, other, ctx)
@@ -893,20 +963,6 @@ def do_turn(speaker, other, space_url):
 
     clean_text, action_results = parse_and_execute_turn(raw_reply, ctx)
     elapsed = time.time() - t0
-
-    # If no [TASK] was produced, retry once with a nudge
-    has_task = any(ar['action'] == 'claude_code' for ar in action_results)
-    if not has_task and not any(ar['action'] in ('create_child',) for ar in action_results):
-        print(f"[{speaker}] No [TASK] found — nudging for a task...")
-        nudge = call_llm(system, user + "\n\nIMPORTANT: You MUST include a [TASK]...[/TASK] block. "
-                         "Assign Claude Code something useful — review code, check configs, improve docs, anything. "
-                         "Do NOT just discuss. Output a [TASK] now.")
-        if nudge and '[TASK]' in nudge:
-            clean_text2, action_results2 = parse_and_execute_turn(nudge, ctx)
-            clean_text = clean_text2
-            action_results = action_results2
-            has_task = True
-
     last_action_results = action_results
 
     en, zh = parse_bilingual(clean_text)
@@ -917,16 +973,17 @@ def do_turn(speaker, other, space_url):
     if action_results:
         for ar in action_results:
             print(f"[{speaker}/DID] {ar['action']}")
-            # Log Claude Code result summary so agents can see what happened
-            if ar['action'] == 'claude_code':
-                result_preview = ar['result'][:800].replace('\n', '\n  ')
-                print(f"  [CC-RESULT] {result_preview}")
         print(f"[{speaker}] Turn #{turn_count}: {len(action_results)} action(s) in {elapsed:.1f}s")
     else:
-        print(f"[{speaker}] Turn #{turn_count}: no task assigned ({elapsed:.1f}s)")
+        print(f"[{speaker}] Turn #{turn_count}: discussion ({elapsed:.1f}s)")
+
+    # Clear CC result after both agents have had a chance to see it
+    if cc_just_finished and speaker == "Eve":
+        with cc_lock:
+            cc_status["result"] = ""
+            _context_cache.clear()
 
     # Add to history with timestamp
-    import datetime
     ts = datetime.datetime.utcnow().strftime("%H:%M")
     entry = {"speaker": speaker, "time": ts}
     if action_results:
@@ -942,40 +999,25 @@ def do_turn(speaker, other, space_url):
     return True
 
 
-# Main loop: Adam → Eve → Adam → Eve → ...
+# Main loop: Adam → Eve → Adam → Eve → ... (non-blocking, CC runs in background)
 while True:
-    # Smart wait: if Cain is BUILDING/RESTARTING, skip Claude Code, just discuss
-    if child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
-        check_and_clear_cooldown()
-        try:
-            info = hf_api.space_info(CHILD_SPACE_ID)
-            new_stage = info.runtime.stage if info.runtime else "unknown"
-            if new_stage != child_state["stage"]:
-                print(f"[WAIT] Stage changed: {child_state['stage']} → {new_stage}")
-                child_state["stage"] = new_stage
-                child_state["alive"] = (new_stage == "RUNNING")
-                _context_cache.clear()
-            else:
-                print(f"[WAIT] Still {new_stage}... waiting 20s")
-                time.sleep(20)
-                continue
-        except Exception as e:
-            print(f"[WAIT] Health check error: {e}")
-            time.sleep(20)
-            continue
+    # Refresh Cain's stage periodically
+    try:
+        info = hf_api.space_info(CHILD_SPACE_ID)
+        new_stage = info.runtime.stage if info.runtime else "unknown"
+        if new_stage != child_state["stage"]:
+            print(f"[STATUS] {child_state['stage']} → {new_stage}")
+            child_state["stage"] = new_stage
+            child_state["alive"] = (new_stage == "RUNNING")
+            _context_cache.clear()
+    except Exception as e:
+        print(f"[STATUS] Error: {e}")
 
     do_turn("Eve", "Adam", EVE_SPACE)
-    time.sleep(20)
-
-    # Skip Adam if Claude Code just pushed (Cain will be rebuilding)
-    if child_state["stage"] in ("BUILDING", "RESTARTING"):
-        print(f"[SKIP] Cain entered {child_state['stage']} — skipping Adam's turn")
-        time.sleep(10)
-        continue
+    time.sleep(TURN_INTERVAL)
 
     do_turn("Adam", "Eve", ADAM_SPACE)
+    time.sleep(TURN_INTERVAL)
 
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]
-
-    time.sleep(20)
