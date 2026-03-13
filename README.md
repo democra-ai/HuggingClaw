@@ -1,5 +1,5 @@
 ---
-title: HuggingClaw - Eve
+title: HuggingClaw - Office
 emoji: 🦞
 colorFrom: yellow
 colorTo: red
