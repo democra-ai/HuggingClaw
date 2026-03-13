@@ -1034,8 +1034,12 @@ def build_user_prompt(speaker, other, ctx):
     else:
         parts.append(f"\nAnalyze the situation and write a [TASK] if CC is idle.")
 
-    # Discussion loop warning
-    if _discussion_loop_count >= 2:
+    # Discussion loop warning - escalates with count
+    if _discussion_loop_count >= 4:
+        parts.append(f"\n🛑 STOP IMMEDIATELY. You have discussed for {_discussion_loop_count} turns with NO ACTION.")
+        parts.append(f"This is a FAILURE MODE. Write ONLY a [TASK]...[/TASK] block. NO discussion text.")
+        parts.append(f"If you don't know what to do, write: [TASK] Analyze the current situation and identify what needs to be fixed [/TASK]")
+    elif _discussion_loop_count >= 2:
         parts.append(f"\n⚠️⚠️⚠️ CRITICAL: You have been DISCUSSING for {_discussion_loop_count} turns without assigning any tasks!")
         parts.append(f"Claude Code is IDLE and {CHILD_NAME} is ALIVE. This is NOT acceptable.")
         parts.append(f"YOU MUST write a [TASK]...[/TASK] block NOW. Do NOT write another discussion response.")
@@ -1104,7 +1108,7 @@ time.sleep(TURN_INTERVAL)
 
 def do_turn(speaker, other, space_url):
     """Execute one conversation turn (non-blocking — CC runs in background)."""
-    global last_action_results, turn_count, _current_speaker
+    global last_action_results, turn_count, _current_speaker, _discussion_loop_count
     turn_count += 1
     _current_speaker = speaker
 
@@ -1115,23 +1119,43 @@ def do_turn(speaker, other, space_url):
     with cc_lock:
         cc_just_finished = (not cc_status["running"] and cc_status["result"])
 
-    system = build_system_prompt(speaker)
-    user = build_user_prompt(speaker, other, ctx)
-    t0 = time.time()
-    raw_reply = call_llm(system, user)
+    # EMERGENCY OVERRIDE: Force a task assignment if agents are stuck in discussion loop
+    # This bypasses the agent when they've discussed for 5+ turns with CC idle and child alive
+    cc_busy = cc_status["running"]
+    child_alive = child_state["alive"] or child_state["stage"] == "RUNNING"
+    if _discussion_loop_count >= 5 and not cc_busy and child_alive:
+        # EMERGENCY OVERRIDE: Force a task assignment if agents are stuck in discussion loop
+        print(f"[LOOP-BREAK] EMERGENCY: {speaker} has discussed for {_discussion_loop_count} turns with CC IDLE. Forcing task assignment.")
+        # Assign a generic diagnostic task automatically
+        forced_task = "Analyze the current situation: Check Cain's logs, examine the codebase, and identify what's blocking progress. List specific files to check and concrete next steps."
+        submit_result = cc_submit_task(forced_task, f"{speaker}(EMERGENCY)", ctx)
+        # Reset loop counter since we forced an action
+        loop_count_before = _discussion_loop_count
+        _discussion_loop_count = 0
+        # Generate a placeholder message for the agent
+        en = f"[EMERGENCY LOOP BREAK] After {loop_count_before} discussion turns without action, I'm forcing Claude Code to analyze the situation and identify what needs to be fixed."
+        zh = f"[紧急循环打断] 在{loop_count_before}次讨论轮次后，我正强制Claude Code分析情况并确定需要修复的内容。"
+        action_results = [{"action": "claude_code(forced)", "result": submit_result}]
+        elapsed = 0.1
+    else:
+        # Normal path: Call LLM
+        system = build_system_prompt(speaker)
+        user = build_user_prompt(speaker, other, ctx)
+        t0 = time.time()
+        raw_reply = call_llm(system, user)
 
-    if not raw_reply:
-        print(f"[{speaker}] (no response)")
-        return False
+        if not raw_reply:
+            print(f"[{speaker}] (no response)")
+            return False
 
-    clean_text, action_results, _ = parse_and_execute_turn(raw_reply, ctx)
-    elapsed = time.time() - t0
-    last_action_results = action_results
-    if action_results:
-        record_actions(speaker, turn_count, action_results)
+        clean_text, action_results, _ = parse_and_execute_turn(raw_reply, ctx)
+        elapsed = time.time() - t0
+        last_action_results = action_results
+        if action_results:
+            record_actions(speaker, turn_count, action_results)
 
-    en, zh = parse_bilingual(clean_text)
-    en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
+        en, zh = parse_bilingual(clean_text)
+        en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
     print(f"[{speaker}/EN] {en}")
     if zh != en:
         print(f"[{speaker}/ZH] {zh}")
