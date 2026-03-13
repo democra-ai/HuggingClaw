@@ -776,12 +776,50 @@ def main():
         print(f"[TIMER] run_openclaw launch: {time.time() - t0:.1f}s")
         print(f"[TIMER] Total startup (init → app launched): {time.time() - t_main_start:.1f}s")
 
+        # 4. Start conversation-loop on Home Space (OFFICE_MODE=1)
+        conv_loop_proc = None
+        if os.environ.get("OFFICE_MODE") == "1":
+            def run_conversation_loop_forever():
+                """Launch conversation-loop with auto-restart on crash."""
+                nonlocal conv_loop_proc
+                time.sleep(60)  # let OpenClaw fully initialize
+                script = os.path.join(os.path.dirname(__file__), "conversation-loop.py")
+                if not os.path.exists(script):
+                    print(f"[SYNC] conversation-loop.py not found at {script}")
+                    return
+                while not stop_event.is_set():
+                    print("[SYNC] Starting conversation-loop.py (Adam & Eve orchestrator)...")
+                    log = open("/tmp/conversation-loop.log", "a")
+                    conv_loop_proc = subprocess.Popen(
+                        [sys.executable, "-u", script],
+                        stdout=log, stderr=subprocess.STDOUT,
+                    )
+                    print(f"[SYNC] conversation-loop.py started (PID {conv_loop_proc.pid})")
+                    exit_code = conv_loop_proc.wait()
+                    log.close()
+                    if stop_event.is_set():
+                        break
+                    print(f"[SYNC] conversation-loop.py exited ({exit_code}), restarting in 30s...")
+                    time.sleep(30)
+
+            conv_thread = threading.Thread(target=run_conversation_loop_forever, daemon=True)
+            conv_thread.start()
+        else:
+            print("[SYNC] Not Home Space (OFFICE_MODE!=1) — skipping conversation-loop")
+
         # Signal handler
         def handle_signal(sig, frame):
             print(f"\n[SYNC] Signal {sig} received. Shutting down...")
             stop_event.set()
             # Wait for background sync to finish if it's running
             t.join(timeout=10)
+            if conv_loop_proc:
+                print("[SYNC] Stopping conversation-loop...")
+                conv_loop_proc.terminate()
+                try:
+                    conv_loop_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    conv_loop_proc.kill()
             if process:
                 process.terminate()
                 try:

@@ -65,7 +65,7 @@ The LLM decides what to do. Actions use [ACTION: ...] tags.
 # ║                                                                    ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 """
-import json, time, re, requests, sys, os, io
+import json, time, re, requests, sys, os, io, subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Force unbuffered output
@@ -158,7 +158,7 @@ def check_and_clear_cooldown():
     try:
         info = hf_api.space_info(CHILD_SPACE_ID)
         stage = info.runtime.stage if info.runtime else "unknown"
-        if stage in ("RUNNING", "RUNTIME_ERROR", "BUILD_ERROR"):
+        if stage in ("RUNNING", "RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
             print(f"[COOLDOWN] Build finished (stage={stage}), clearing cooldown early ({int(elapsed)}s elapsed)")
             last_rebuild_trigger_at = 0
             child_state["stage"] = stage
@@ -260,9 +260,10 @@ def action_check_health():
         stage = info.runtime.stage if info.runtime else "NO_RUNTIME"
         child_state["stage"] = stage
         child_state["alive"] = (stage == "RUNNING")
-        if stage in ("RUNTIME_ERROR", "BUILD_ERROR", "RUNNING"):
+        if stage in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR", "RUNNING"):
             # Clear write dedup so agents can re-write files to fix issues
             # RUNNING included: API may be unresponsive, agents need to patch code
+            # CONFIG_ERROR included: agents need to fix metadata/config issues
             if files_written_this_cycle:
                 print(f"[DEDUP-CLEAR] {stage} detected — unlocking {len(files_written_this_cycle)} file(s) for re-write: {files_written_this_cycle}")
                 for f in files_written_this_cycle:
@@ -502,6 +503,109 @@ def action_send_bubble(text):
         return f"Error sending message: {e}"
 
 
+# ── Claude Code Action ────────────────────────────────────────────────────────
+
+CLAUDE_WORK_DIR = "/tmp/claude-workspace"
+CLAUDE_TIMEOUT = 300  # 5 minutes
+
+def action_claude_code(task):
+    """Run Claude Code CLI to autonomously complete a coding task on Cain's Space."""
+    if not child_state["created"]:
+        return f"{CHILD_NAME} not born yet. Use [ACTION: create_child] first."
+
+    global _pending_cooldown
+    repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{CHILD_SPACE_ID}"
+
+    # 1. Clone / reset to latest
+    try:
+        if os.path.exists(f"{CLAUDE_WORK_DIR}/.git"):
+            try:
+                subprocess.run(
+                    "git fetch origin && git reset --hard origin/main",
+                    shell=True, cwd=CLAUDE_WORK_DIR, timeout=30,
+                    capture_output=True, check=True
+                )
+            except Exception:
+                subprocess.run(f"rm -rf {CLAUDE_WORK_DIR}", shell=True, capture_output=True)
+                subprocess.run(
+                    f"git clone --depth 20 {repo_url} {CLAUDE_WORK_DIR}",
+                    shell=True, timeout=60, capture_output=True, check=True
+                )
+        else:
+            if os.path.exists(CLAUDE_WORK_DIR):
+                subprocess.run(f"rm -rf {CLAUDE_WORK_DIR}", shell=True, capture_output=True)
+            subprocess.run(
+                f"git clone --depth 20 {repo_url} {CLAUDE_WORK_DIR}",
+                shell=True, timeout=60, capture_output=True, check=True
+            )
+        subprocess.run('git config user.name "Claude Code"',
+                       shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True)
+        subprocess.run('git config user.email "claude-code@huggingclaw"',
+                       shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True)
+    except Exception as e:
+        return f"Failed to prepare workspace: {e}"
+
+    # 2. Run Claude Code with z.ai backend (Zhipu GLM)
+    env = os.environ.copy()
+    env.update({
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": ZHIPU_KEY,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "GLM-4.7",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-4.7",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-4.5-Air",
+        "CI": "true",  # non-interactive mode
+    })
+
+    print(f"[CLAUDE-CODE] Running: {task[:100]}...")
+    try:
+        result = subprocess.run(
+            ["claude", "-p", task, "--output-format", "text"],
+            cwd=CLAUDE_WORK_DIR,
+            env=env,
+            timeout=CLAUDE_TIMEOUT,
+            capture_output=True,
+            text=True,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if not output.strip():
+            output = "(no output)"
+    except subprocess.TimeoutExpired:
+        return "Claude Code timed out after 5 minutes."
+    except FileNotFoundError:
+        return "Claude Code CLI not found. Is @anthropic-ai/claude-code installed?"
+    except Exception as e:
+        return f"Claude Code failed to start: {e}"
+
+    # 3. Push changes back to Cain's Space
+    try:
+        status_out = subprocess.run(
+            "git status --porcelain",
+            shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True, text=True
+        ).stdout.strip()
+
+        if not status_out:
+            push_result = "No files changed."
+        else:
+            subprocess.run("git add -A", shell=True, cwd=CLAUDE_WORK_DIR,
+                          capture_output=True, check=True)
+            msg = task[:72].replace('"', '\\"')
+            subprocess.run(f'git commit -m "Claude Code: {msg}"',
+                          shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True, check=True)
+            subprocess.run("git push", shell=True, cwd=CLAUDE_WORK_DIR,
+                          timeout=60, capture_output=True, check=True)
+            push_result = f"Pushed changes:\n{status_out}"
+            _pending_cooldown = True  # triggers rebuild cooldown
+            print(f"[CLAUDE-CODE] Pushed: {status_out}")
+    except Exception as e:
+        push_result = f"Push failed: {e}"
+
+    # Truncate output to fit LLM context
+    if len(output) > 3000:
+        output = output[:3000] + f"\n... (truncated, total {len(output)} chars)"
+
+    return f"=== Claude Code Output ===\n{output}\n\n=== Changes ===\n{push_result}"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  MODULE 2B: SUB-AGENT DELEGATION
 #  execute_subtask(): Spawns a focused sub-agent with its own LLM call.
@@ -524,6 +628,7 @@ You have access to {CHILD_NAME}'s Space and Dataset:
   [ACTION: write_file:dataset:PATH] with [CONTENT]...[/CONTENT]
   [ACTION: set_env:KEY:VALUE] / [ACTION: set_secret:KEY:VALUE]
   [ACTION: restart] / [ACTION: get_env]
+  [ACTION: claude_code:TASK]                    — Run Claude Code for complex coding fixes
 
 CHILD STATUS: {status}
 
@@ -531,7 +636,8 @@ RULES:
 1. Be concise — report findings in 2-3 sentences
 2. Execute 1-3 actions to complete your task
 3. No delegation — you cannot create sub-agents
-4. Focus ONLY on your assigned task"""
+4. Focus ONLY on your assigned task
+5. For complex code changes, prefer [ACTION: claude_code:TASK] over manual write_file"""
 
     sub_user = f"Execute this task now: {task_description}"
 
@@ -648,7 +754,7 @@ def parse_and_execute_actions(raw_text, depth=0):
 
         # Block restart/write when Cain is building/restarting — would reset build
         # APP_STARTING is allowed so agents can fix stuck startups
-        if child_state["stage"] in ("BUILDING", "RESTARTING") and name in ("restart", "write_file", "set_env", "set_secret"):
+        if child_state["stage"] in ("BUILDING", "RESTARTING") and name in ("restart", "write_file", "set_env", "set_secret", "claude_code"):
             result = (f"⛔ BLOCKED: Cain is currently {child_state['stage']}. "
                       "Do NOT restart or make changes — wait for it to finish. "
                       "Every write_file during build RESETS the entire build from scratch. "
@@ -658,7 +764,7 @@ def parse_and_execute_actions(raw_text, depth=0):
             break
 
         # Rebuild cooldown — prevent writing to Space repo too soon after last rebuild trigger
-        if name in ("write_file", "set_env", "set_secret", "restart", "delete_file") and last_rebuild_trigger_at > 0:
+        if name in ("write_file", "set_env", "set_secret", "restart", "delete_file", "claude_code") and last_rebuild_trigger_at > 0:
             check_and_clear_cooldown()  # may clear cooldown early if build done
             elapsed = time.time() - last_rebuild_trigger_at if last_rebuild_trigger_at > 0 else 9999
             if elapsed < REBUILD_COOLDOWN_SECS:
@@ -712,6 +818,9 @@ def parse_and_execute_actions(raw_text, depth=0):
             result = action_get_env()
         elif name == "send_bubble" and len(args) >= 1:
             result = action_send_bubble(":".join(args))  # rejoin in case message has colons
+        elif name == "claude_code" and len(args) >= 1:
+            task_desc = ":".join(args)
+            result = action_claude_code(task_desc)
         elif name == "delegate" and len(args) >= 1:
             task_desc = ":".join(args)
             if depth >= MAX_DELEGATE_DEPTH:
@@ -743,7 +852,7 @@ def parse_and_execute_actions(raw_text, depth=0):
                 break
 
             # Apply same blocking rules
-            if child_state["stage"] in ("BUILDING", "RESTARTING") and name in ("restart", "write_file", "set_env", "set_secret"):
+            if child_state["stage"] in ("BUILDING", "RESTARTING") and name in ("restart", "write_file", "set_env", "set_secret", "claude_code"):
                 result = (f"⛔ BLOCKED: Cain is currently {child_state['stage']}. Wait for it to finish. Writing during build RESETS it.")
                 results.append({"action": action_str, "result": result})
                 print(f"[BLOCKED] sub-agent {name} — Cain is {child_state['stage']}")
@@ -796,6 +905,9 @@ def parse_and_execute_actions(raw_text, depth=0):
                 result = action_get_env()
             elif name == "send_bubble" and len(args) >= 1:
                 result = action_send_bubble(":".join(args))
+            elif name == "claude_code" and len(args) >= 1:
+                task_desc = ":".join(args)
+                result = action_claude_code(task_desc)
             elif name == "delegate" and len(args) >= 1:
                 task_desc = ":".join(args)
                 if depth >= MAX_DELEGATE_DEPTH:
@@ -1090,13 +1202,13 @@ def update_workflow_from_actions(action_results):
         # State transitions
         if action_name == "create_child":
             transition_state("DIAGNOSE")
-        elif action_name in ("write_file", "set_env", "set_secret"):
+        elif action_name in ("write_file", "set_env", "set_secret", "claude_code"):
             transition_state("VERIFY")
         elif action_name == "restart":
             transition_state("VERIFY")
         elif action_name == "check_health" and child_state["alive"]:
             transition_state("MONITOR")
-        elif action_name == "check_health" and child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR"):
+        elif action_name == "check_health" and child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
             if workflow_state == "VERIFY":
                 transition_state("DIAGNOSE")  # Fix didn't work, back to diagnosing
 
@@ -1178,6 +1290,15 @@ MODIFYING (these change Cain):
   [ACTION: set_secret:KEY:VALUE]                — Set a secret (like API keys)
   [ACTION: restart]                             — Restart Cain's Space
   [ACTION: send_bubble:MESSAGE]                 — Send a message to Cain (bubble text)
+
+ADVANCED CODING (autonomous coding agent — powered by Claude Code + Zhipu GLM):
+  [ACTION: claude_code:DETAILED TASK DESCRIPTION]
+  — Spawns Claude Code to autonomously analyze, fix, or improve Cain's code
+  — Claude Code clones Cain's repo, reads code, makes changes, and pushes them back
+  — Use for complex coding tasks: debugging, refactoring, adding features, fixing errors
+  — Takes up to 5 minutes — use for tasks that need deep code analysis
+  — Example: [ACTION: claude_code:Fix the RUNTIME_ERROR in app.py - the gradio import fails because pydub requires pyaudioop which was removed in Python 3.13. Remove pydub dependency and use a simpler alternative.]
+  — ⚠️ Be SPECIFIC in your task description — include error messages, file names, and what you want changed
 
 DELEGATION (create sub-agents for parallel work):
   [ACTION: delegate:TASK DESCRIPTION]           — Spawn a sub-agent to handle a specific task
@@ -1301,8 +1422,8 @@ def _get_guidance(speaker):
 
     elif workflow_state == "ACT":
         return ("⚡ ACTION PHASE — Stop reading, start fixing! "
-                "Use [ACTION: write_file:space:PATH] or [ACTION: write_file:dataset:PATH] "
-                "to make a concrete improvement. Or [ACTION: set_env/set_secret] to configure. "
+                "Use [ACTION: write_file:space:PATH] or [ACTION: claude_code:TASK] for complex fixes. "
+                "Or [ACTION: set_env/set_secret] to configure. "
                 "You have enough information — ACT NOW.")
 
     elif workflow_state == "VERIFY":
