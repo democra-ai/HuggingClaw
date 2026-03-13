@@ -87,13 +87,15 @@ async function pollRemoteAgent(agent) {
     clearTimeout(timeout);
     if (resp.ok) {
       const data = await resp.json();
+      const prev = remoteAgentStates.get(agent.id) || {};
       remoteAgentStates.set(agent.id, {
         agentId: agent.id, name: agent.name,
         state: data.state || 'idle',
         detail: data.detail || '',
         area: (data.state === 'idle') ? 'breakroom' : (data.state === 'error') ? 'error' : 'writing',
         authStatus: 'approved',
-        updated_at: data.updated_at
+        updated_at: data.updated_at,
+        bubbleText: data.bubbleText || prev.bubbleText || ''
       });
     }
   } catch (_) {
@@ -118,6 +120,7 @@ let currentState = {
   state: 'syncing', detail: `${AGENT_NAME} is starting...`,
   progress: 0, updated_at: new Date().toISOString()
 };
+let currentBubbleText = '';
 
 // Once OpenClaw starts listening, mark as idle
 setTimeout(() => {
@@ -199,8 +202,29 @@ http.Server.prototype.emit = function (event, ...args) {
       });
       res.end(JSON.stringify({
         ...currentState,
+        bubbleText: currentBubbleText,
         officeName: `${AGENT_NAME}'s Office`
       }));
+      return true;
+    }
+
+    // POST /api/bubble → set bubble text (used by conversation orchestrator)
+    if (pathname === '/api/bubble' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { text } = JSON.parse(body);
+          currentBubbleText = text || '';
+          // Auto-clear bubble after 8 seconds
+          setTimeout(() => { if (currentBubbleText === text) currentBubbleText = ''; }, 8000);
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
       return true;
     }
 

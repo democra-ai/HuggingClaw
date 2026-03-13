@@ -4530,6 +4530,25 @@ function toggleBrokerPanel() {
                     }
 
                     g.nameText.setText(agent.name || '访客');
+
+                    // Show bubble immediately when bubbleText changes from API
+                    if (agent.bubbleText && agent.bubbleText !== (g._lastBubbleText || '')) {
+                        g._lastBubbleText = agent.bubbleText;
+                        if (guestBubbles[id]) { guestBubbles[id].destroy(); delete guestBubbles[id]; }
+                        const bx = g.sprite.x;
+                        const nameH = (g.nameText && g.nameText.height) ? g.nameText.height : 16;
+                        const by = (g.nameText ? g.nameText.y : (g.sprite.y - 150)) - (nameH / 2) - 22;
+                        const fontSize = IS_TOUCH_DEVICE ? 16 : 14;
+                        const displayText = agent.bubbleText.length > 30 ? agent.bubbleText.slice(0, 30) + '…' : agent.bubbleText;
+                        const bgR = game.add.rectangle(bx, by, displayText.length * 11 + 30, 34, 0xffffff, 0.95);
+                        bgR.setStrokeStyle(2, 0x000000);
+                        const txtR = game.add.text(bx, by, displayText, { fontFamily: 'ArkPixel, monospace', fontSize: fontSize + 'px', fill: '#000' }).setOrigin(0.5);
+                        const bub = game.add.container(0, 0, [bgR, txtR]);
+                        bub.setDepth(2700);
+                        bub.__followAgentId = id;
+                        guestBubbles[id] = bub;
+                        setTimeout(() => { if (guestBubbles[id] === bub) { bub.destroy(); delete guestBubbles[id]; } }, 6000);
+                    }
                 }
             });
 
@@ -4573,9 +4592,15 @@ function toggleBrokerPanel() {
                 syncing: ['同步中，马上更新状态', '正在同步进度到系统', '数据同步中请稍候'],
                 error: ['我在 bug 区排查问题', '检测到异常，正在修复', '报警中，先定位再处理']
             };
-            const agentState = (guestAgents.find(a => a.agentId === id) || {}).state || 'idle';
+            const agentData = guestAgents.find(a => a.agentId === id) || {};
+            const agentState = agentData.state || 'idle';
             const thoughts = statusThoughtsMap[agentState] || statusThoughtsMap.idle;
-            const text = (demoVisitor && demoVisitor.bubbleText) ? demoVisitor.bubbleText : thoughts[Math.floor(Math.random() * thoughts.length)];
+            // Priority: API bubbleText > demo bubbleText > random thoughts
+            const text = agentData.bubbleText
+                ? agentData.bubbleText
+                : (demoVisitor && demoVisitor.bubbleText)
+                    ? demoVisitor.bubbleText
+                    : thoughts[Math.floor(Math.random() * thoughts.length)];
 
             if (guestBubbles[id]) {
                 guestBubbles[id].destroy();
@@ -5576,6 +5601,21 @@ function toggleBrokerPanel() {
                         typewriterTarget = '状态更新异常，正在恢复...';
                         typewriterText = '';
                         typewriterIndex = 0;
+                    }
+                    // Show Star bubble from API bubbleText
+                    if (data.bubbleText && data.bubbleText !== window._lastStarBubbleText) {
+                        window._lastStarBubbleText = data.bubbleText;
+                        // Temporarily switch state to allow bubble display
+                        const savedState = currentState;
+                        currentState = 'writing';
+                        const lang = uiLang || 'zh';
+                        const langPack = BUBBLE_TEXTS[lang] || BUBBLE_TEXTS.zh;
+                        const oldTexts = Array.isArray(langPack.writing) ? [...langPack.writing] : [];
+                        const bubbleMsg = data.bubbleText.length > 30 ? data.bubbleText.slice(0, 30) + '…' : data.bubbleText;
+                        langPack.writing = [bubbleMsg];
+                        showBubble();
+                        langPack.writing = oldTexts;
+                        currentState = savedState;
                     }
                 })
                 .catch(error => {
