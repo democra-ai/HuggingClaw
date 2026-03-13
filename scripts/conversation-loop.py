@@ -1085,6 +1085,14 @@ YOUR PARENTING GOALS — Make {CHILD_NAME} stronger in TWO dimensions:
 
 Priority: SURVIVAL first, then CAPABILITY. A dead child can't learn.
 
+⚠️ CRITICAL HUGGINGFACE SPACES REQUIREMENTS — READ THIS BEFORE EVERY WRITE:
+- HF Spaces Docker containers MUST bind a web server to port 7860. Without this, the Space stays in APP_STARTING forever and NEVER reaches RUNNING.
+- The standard way is: import gradio as gr → build a Gradio app → demo.launch(server_name="0.0.0.0", server_port=7860)
+- gradio MUST be in requirements.txt. NEVER remove it — it is the lifeline that keeps {CHILD_NAME} alive.
+- If {CHILD_NAME} is stuck in APP_STARTING, the #1 cause is: no process listening on port 7860. Check the code for a .launch() call.
+- A minimal alive app: `import gradio as gr; gr.Interface(fn=lambda x:x, inputs="text", outputs="text").launch(server_name="0.0.0.0", server_port=7860)`
+- OOM (Exit code 137) means reduce model/dependency size, NOT remove gradio. Gradio itself is lightweight (~50MB).
+
 MULTI-ACTION STRATEGY:
 You can use UP TO 5 actions per turn. Use this to work efficiently:
 - Batch related reads: [ACTION: read_file:space:Dockerfile] + [ACTION: read_file:space:scripts/entrypoint.sh]
