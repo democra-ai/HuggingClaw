@@ -170,6 +170,11 @@ def action_check_health():
         stage = info.runtime.stage if info.runtime else "NO_RUNTIME"
         child_state["stage"] = stage
         child_state["alive"] = (stage == "RUNNING")
+        if stage in ("RUNTIME_ERROR", "BUILD_ERROR"):
+            return (f"{CHILD_NAME} has a {stage}! "
+                    f"To diagnose: read the Dockerfile [ACTION: read_file:space:Dockerfile], "
+                    f"check scripts [ACTION: read_file:space:scripts/token-redirect.cjs], "
+                    f"or try [ACTION: restart] to see if it self-heals.")
         return f"{CHILD_NAME} stage: {stage}. {'Running but API not responding.' if stage == 'RUNNING' else ''}"
     except Exception as e:
         return f"Cannot reach {CHILD_NAME}: {e}"
@@ -280,6 +285,7 @@ def action_send_bubble(text):
 def parse_and_execute_actions(raw_text):
     """Parse [ACTION: ...] from LLM output. Execute. Return (clean_text, results)."""
     results = []
+    executed = set()  # Deduplicate
 
     # 1. Handle write_file with [CONTENT]...[/CONTENT] block
     write_match = re.search(
@@ -288,22 +294,34 @@ def parse_and_execute_actions(raw_text):
     )
     if write_match:
         target, path, content = write_match.group(1), write_match.group(2).strip(), write_match.group(3).strip()
-        result = action_write_file(target, path, content)
-        results.append({"action": f"write_file:{target}:{path}", "result": result})
-        print(f"[ACTION] write_file:{target}:{path} → {result[:100]}")
+        key = f"write_file:{target}:{path}"
+        if key not in executed:
+            executed.add(key)
+            result = action_write_file(target, path, content)
+            results.append({"action": key, "result": result})
+            print(f"[ACTION] {key} → {result[:100]}")
 
-    # 2. Handle all other [ACTION: ...] tags
+    # 2. Handle all [ACTION: ...] tags — deduplicate by action key
     for match in re.finditer(r'\[ACTION:\s*([^\]]+)\]', raw_text):
         action_str = match.group(1).strip()
 
-        # Skip write_file actions (handled above)
+        # Skip write_file (handled above)
         if action_str.startswith("write_file"):
             continue
+
+        # Deduplicate
+        if action_str in executed:
+            continue
+        executed.add(action_str)
 
         # Parse action name and arguments (colon-separated)
         parts = [p.strip() for p in action_str.split(":")]
         name = parts[0]
         args = parts[1:]
+
+        # Only execute first action (one per turn)
+        if len(results) >= 1:
+            break
 
         result = None
         if name == "create_child":
@@ -315,11 +333,11 @@ def parse_and_execute_actions(raw_text):
         elif name == "list_files" and len(args) >= 1:
             result = action_list_files(args[0])
         elif name == "read_file" and len(args) >= 2:
-            result = action_read_file(args[0], args[1])
+            result = action_read_file(args[0], ":".join(args[1:]))  # path may have colons
         elif name == "set_env" and len(args) >= 2:
-            result = action_set_env(args[0], args[1])
+            result = action_set_env(args[0], ":".join(args[1:]))
         elif name == "set_secret" and len(args) >= 2:
-            result = action_set_secret(args[0], args[1])
+            result = action_set_secret(args[0], ":".join(args[1:]))
         elif name == "get_env":
             result = action_get_env()
         elif name == "send_bubble" and len(args) >= 1:
@@ -494,16 +512,27 @@ def build_user_prompt(speaker, other):
         for ar in last_action_results:
             action_context += f"  [{ar['action']}]:\n{ar['result']}\n"
 
-    # Guidance based on state
+    # Guidance based on state — prevent action loops
     guidance = ""
+    recent_actions = [ar["action"].split(":")[0] for ar in last_action_results] if last_action_results else []
     if not child_state["created"]:
-        guidance = "Your child hasn't been born yet. Discuss and then create them!"
-    elif len(history) % 3 == 0:
-        guidance = "Explore your child's files to understand what they have. Use [ACTION: list_files:space] or [ACTION: read_file:...]."
-    elif len(history) % 3 == 1:
-        guidance = "Based on what you know, discuss what to improve. Then take action."
+        guidance = "Your child hasn't been born yet. Use [ACTION: create_child] now!"
+    elif "check_health" in recent_actions or "list_files" in recent_actions:
+        guidance = ("You already checked health/listed files. Now READ a specific file to understand the problem. "
+                    "Try [ACTION: read_file:space:Dockerfile] or [ACTION: read_file:space:scripts/token-redirect.cjs] "
+                    "or [ACTION: read_file:dataset:.openclaw/openclaw.json]. "
+                    "DO NOT repeat check_health or list_files — move forward!")
+    elif "read_file" in recent_actions:
+        guidance = ("You've read a file. Now DECIDE: what needs to change? "
+                    "Use [ACTION: write_file:space:PATH] or [ACTION: write_file:dataset:PATH] to make improvements, "
+                    "or [ACTION: restart] if you need to apply changes.")
+    elif "write_file" in recent_actions:
+        guidance = ("You just modified a file. If it was a Space file, it triggers a rebuild. "
+                    "Use [ACTION: check_health] to see if Cain is recovering, or [ACTION: restart] to apply changes.")
     else:
-        guidance = "Check on your child's health or continue improving them."
+        guidance = ("Explore your child. Use [ACTION: read_file:space:Dockerfile] to see the build, "
+                    "or [ACTION: read_file:dataset:.openclaw/openclaw.json] to see the config. "
+                    "Don't just check_health repeatedly — dig into the actual files!")
 
     return f"""You are {speaker}, talking with {other}.
 
