@@ -1,5 +1,5 @@
 ---
-title: HuggingClaw - Office
+title: HuggingClaw
 emoji: 🦞
 colorFrom: yellow
 colorTo: red
