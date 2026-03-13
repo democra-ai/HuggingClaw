@@ -311,6 +311,25 @@ def action_send_bubble(text):
         return f"Error: {e}"
 
 
+def action_terminate_cc():
+    """Terminate a stuck Claude Code process. Use when CC has been running with no new output for too long."""
+    global cc_status, cc_live_lines, _cc_stale_count, _last_cc_snapshot, _last_cc_output_time
+    with cc_lock:
+        if not cc_status["running"]:
+            return "Claude Code is not running. Nothing to terminate."
+        # Mark as not running - the background thread will eventually finish
+        cc_status["running"] = False
+        cc_status["result"] = "(TERMINATED by agent - task was stuck)"
+        # Reset staleness tracking
+        _cc_stale_count = 0
+        _last_cc_snapshot = ""
+        _last_cc_output_time = 0
+        cc_live_lines.clear()
+        assigned_by = cc_status["assigned_by"]
+        task = cc_status["task"]
+    return f"Terminated stuck Claude Code task (assigned by {assigned_by}). The task was: {task[:100]}..."
+
+
 # ── Claude Code Action (THE STAR) ─────────────────────────────────────────────
 
 CLAUDE_WORK_DIR = "/tmp/claude-workspace"
@@ -433,6 +452,8 @@ cc_status = {"running": False, "task": "", "result": "", "assigned_by": "", "sta
 cc_lock = threading.Lock()
 _last_cc_snapshot = ""              # tracks whether CC output changed between turns
 _cc_stale_count = 0                 # how many turns CC output hasn't changed
+_last_cc_output_time = 0.0          # timestamp of last NEW CC output line
+CC_STUCK_TIMEOUT = 180              # seconds with no new output before CC is considered STUCK
 
 
 def cc_submit_task(task, assigned_by, ctx):
@@ -446,6 +467,8 @@ def cc_submit_task(task, assigned_by, ctx):
         cc_status["assigned_by"] = assigned_by
         cc_status["started"] = time.time()
         cc_live_lines.clear()
+        global _last_cc_output_time
+        _last_cc_output_time = time.time()  # Initialize to now, will update as we get output
 
     enriched = enrich_task_with_context(task, ctx)
     print(f"[TASK] {assigned_by} assigned to Claude Code ({len(enriched)} chars)...")
@@ -464,7 +487,7 @@ def cc_submit_task(task, assigned_by, ctx):
 
 def cc_get_live_status():
     """Get CC's current status and recent output for agents to discuss."""
-    global _last_cc_snapshot, _cc_stale_count
+    global _last_cc_snapshot, _cc_stale_count, _last_cc_output_time
     with cc_lock:
         if cc_status["running"]:
             elapsed = int(time.time() - cc_status["started"])
@@ -477,10 +500,18 @@ def cc_get_live_status():
             else:
                 _cc_stale_count = 0
                 _last_cc_snapshot = snapshot
+                _last_cc_output_time = time.time()  # Update when we see NEW output
             stale_note = f"\n(No new output for {_cc_stale_count} turns — discuss other topics while waiting)" if _cc_stale_count >= 2 else ""
+
+            # Detect STUCK CC: been running with no new output for too long
+            time_since_new_output = int(time.time() - _last_cc_output_time) if _last_cc_output_time > 0 else elapsed
+            stuck_note = ""
+            if time_since_new_output > CC_STUCK_TIMEOUT and _cc_stale_count >= 4:
+                stuck_note = f"\n⚠️ STUCK: No new output for {time_since_new_output}s! Consider terminating and re-assigning."
+
             return (f"🔨 Claude Code is WORKING (assigned by {cc_status['assigned_by']}, {elapsed}s ago)\n"
                     f"Task: {cc_status['task']}\n"
-                    f"Recent output:\n{recent}{stale_note}")
+                    f"Recent output:\n{recent}{stale_note}{stuck_note}")
         elif cc_status["result"]:
             return (f"✅ Claude Code FINISHED (assigned by {cc_status['assigned_by']})\n"
                     f"Result:\n{cc_status['result'][:1500]}")
@@ -800,6 +831,11 @@ def parse_and_execute_turn(raw_text, ctx):
         result = action_send_bubble(bubble_match.group(1).strip())
         results.append({"action": "send_bubble", "result": result})
 
+    # 5. Handle [ACTION: terminate_cc] (terminate stuck Claude Code)
+    if re.search(r'\[ACTION:\s*terminate_cc\]', raw_text):
+        result = action_terminate_cc()
+        results.append({"action": "terminate_cc", "result": result})
+
     # Activate deferred cooldown
     if _pending_cooldown:
         last_rebuild_trigger_at = time.time()
@@ -809,12 +845,16 @@ def parse_and_execute_turn(raw_text, ctx):
     # Update discussion loop counter
     cc_busy = cc_status["running"]
     child_alive = child_state["alive"] or child_state["stage"] == "RUNNING"
-    if task_assigned or not cc_busy or not child_alive:
-        # Reset counter if task assigned, CC busy, or child not alive
+    # Reset counter when task assigned (progress!) or child not alive (can't work on dead child)
+    # DO NOT reset when CC is busy - that's when agents should be discussing while waiting
+    # DO NOT reset when CC is idle - that's exactly when we want to detect discussion loops
+    if task_assigned or not child_alive:
+        # Reset counter if task assigned or child not alive
         if _discussion_loop_count > 0:
-            print(f"[LOOP-DISCUSS] Reset (task assigned or CC busy or child not alive)")
+            print(f"[LOOP-DISCUSS] Reset (task assigned or child not alive)")
         _discussion_loop_count = 0
     else:
+        # Increment when: CC is idle AND child is alive AND no task assigned (potential discussion loop)
         _discussion_loop_count += 1
         if _discussion_loop_count >= 2:
             print(f"[LOOP-DISCUSS] WARNING: {_discussion_loop_count} consecutive discussion-only turns with CC IDLE and child alive!")
@@ -928,6 +968,7 @@ AVAILABLE ACTIONS:
   [ACTION: delete_env:KEY]       — Delete an environment variable
   [ACTION: send_bubble:MESSAGE]  — Send a message to {CHILD_NAME}
   [ACTION: create_child]         — Create {CHILD_NAME} (if not born)
+  [ACTION: terminate_cc]         — Terminate a STUCK Claude Code process (use when CC has no new output for 180s+)
 
 HF SPACES TECHNICAL NOTES:
 - Docker containers MUST bind port 7860.
