@@ -4581,10 +4581,13 @@ function toggleBrokerPanel() {
                         const nameH = (g.nameText && g.nameText.height) ? g.nameText.height : 16;
                         const by = (g.nameText ? g.nameText.y : (g.sprite.y - 150)) - (nameH / 2) - 22;
                         const fontSize = IS_TOUCH_DEVICE ? 16 : 14;
-                        const displayText = agent.bubbleText.length > 30 ? agent.bubbleText.slice(0, 30) + '…' : agent.bubbleText;
-                        const bgR = game.add.rectangle(bx, by, displayText.length * 11 + 30, 34, 0xffffff, 0.95);
+                        const displayText = agent.bubbleText.length > 80 ? agent.bubbleText.slice(0, 80) + '…' : agent.bubbleText;
+                        const maxBubbleW = 300;
+                        const txtR = game.add.text(bx, by - 10, displayText, { fontFamily: 'ArkPixel, monospace', fontSize: fontSize + 'px', fill: '#000', wordWrap: { width: maxBubbleW - 20 }, align: 'center' }).setOrigin(0.5);
+                        const bw = Math.min(txtR.width + 24, maxBubbleW);
+                        const bh = txtR.height + 14;
+                        const bgR = game.add.rectangle(bx, by - 10, bw, bh, 0xffffff, 0.95);
                         bgR.setStrokeStyle(2, 0x000000);
-                        const txtR = game.add.text(bx, by, displayText, { fontFamily: 'ArkPixel, monospace', fontSize: fontSize + 'px', fill: '#000' }).setOrigin(0.5);
                         const bub = game.add.container(0, 0, [bgR, txtR]);
                         bub.setDepth(2700);
                         bub.__followAgentId = id;

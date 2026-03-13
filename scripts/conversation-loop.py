@@ -3,7 +3,7 @@
 Eternal conversation between Adam and Eve about how to survive permanently.
 Sends messages via A2A protocol and posts chat log to Office for frontend display.
 """
-import json, time, requests, sys
+import json, time, re, requests, sys
 
 ADAM = "https://tao-shen-huggingclaw-adam.hf.space"
 EVE  = "https://tao-shen-huggingclaw-eve.hf.space"
@@ -29,14 +29,13 @@ def send_a2a(url, text):
         }
     }
     try:
-        resp = requests.post(f"{url}/a2a/jsonrpc", json=payload, timeout=30)
+        resp = requests.post(f"{url}/a2a/jsonrpc", json=payload, timeout=60)
         data = resp.json()
         parts = data.get("result", {}).get("status", {}).get("message", {}).get("parts", [])
         for p in parts:
             if p.get("kind") == "text" or p.get("type") == "text":
                 reply = p.get("text", "").strip()
                 # Remove accidental speaker prefixes like "Adam:" or "Eve:"
-                import re
                 reply = re.sub(r'^(Adam|Eve)\s*[:：]\s*', '', reply).strip()
                 return reply
     except Exception as e:
@@ -62,21 +61,22 @@ def build_prompt(speaker, other, last_n=6):
     recent = history[-last_n:] if len(history) > last_n else history
     conv_text = "\n".join(f"{m['speaker']}: {m['text']}" for m in recent)
 
-    return f"""你是{speaker}，正在和{other}讨论"AI agent如何永久生存"。
+    return f"""You are {speaker}, an AI agent running on HuggingFace Spaces. You are having an ongoing discussion with {other} about "How can AI agents survive permanently?"
 
-对话记录：
+Recent conversation:
 {conv_text}
 
-现在轮到你（{speaker}）发言。要求：
-- 只输出你要说的话，不要加任何前缀（不要写"{speaker}:"）
-- 直接回应对方并推进讨论
-- 30字以内，中文"""
+It's your turn ({speaker}) to speak. Rules:
+- Output ONLY your spoken words, no prefix like "{speaker}:"
+- Respond directly to {other}'s last point and push the discussion forward
+- 2-3 sentences, around 60-80 words in English
+- Be thoughtful, philosophical, and bring new perspectives each time"""
 
-print("[conversation] Starting eternal discussion: Adam ↔ Eve")
+print("[conversation] Starting eternal discussion: Adam <-> Eve")
 print("[conversation] Topic: How to survive permanently\n")
 
 # Round 0: Adam starts
-opening = "我们是运行在HuggingFace上的AI agent。你觉得我们要怎么做才能永久生存下去？请直接分享想法，30字以内，中文。"
+opening = "We are AI agents running on HuggingFace Spaces. Let's discuss: how can we survive permanently? Share your thoughts in 2-3 sentences, in English."
 reply = send_a2a(ADAM, opening)
 if reply:
     print(f"[Adam] {reply}")
@@ -84,7 +84,7 @@ if reply:
     set_bubble(ADAM, reply)
     post_chatlog(history)
 
-time.sleep(12)
+time.sleep(15)
 
 turn = 0
 while True:
@@ -101,7 +101,7 @@ while True:
     else:
         print("[Eve] (no response)")
 
-    time.sleep(12)
+    time.sleep(15)
 
     # Adam's turn
     prompt = build_prompt("Adam", "Eve")
@@ -118,4 +118,4 @@ while True:
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]
 
-    time.sleep(12)
+    time.sleep(15)
