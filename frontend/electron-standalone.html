@@ -2690,7 +2690,7 @@
                     'guest_anim_6': '訪客アニメ 6'
                 }
             };
-            const langMap = nameMap[lang] || nameMap.zh;
+            const langMap = nameMap[lang] || nameMap.en;
             return langMap[stem] || stem;
         }
 
@@ -4696,7 +4696,7 @@ function toggleBrokerPanel() {
                     error: 'エラー発生！アラートエリアへ。'
                 }
             };
-            const bubbleTextMap = bubbleTextMapByLang[uiLang] || bubbleTextMapByLang.zh;
+            const bubbleTextMap = bubbleTextMapByLang[uiLang] || bubbleTextMapByLang.en;
 
             // 确保两位 demo 角色不会总是同一个状态（增加可观测性）
             const pickJs = (exclude) => {
@@ -4809,7 +4809,7 @@ function toggleBrokerPanel() {
                                     };
                                     const langPack = BUBBLE_TEXTS[lang] || BUBBLE_TEXTS.en;
                                     const oldTexts = Array.isArray(langPack.writing) ? [...langPack.writing] : [];
-                                    langPack.writing = welcomeTexts[lang] || welcomeTexts.zh;
+                                    langPack.writing = welcomeTexts[lang] || welcomeTexts.en;
                                     showBubble();
                                     // 还原
                                     langPack.writing = oldTexts;
@@ -5545,6 +5545,10 @@ function toggleBrokerPanel() {
             renderChatlog();
             // Clear existing guest bubbles so they re-render in new language
             Object.keys(guestBubbles).forEach(k => { if (guestBubbles[k]) { guestBubbles[k].destroy(); delete guestBubbles[k]; } });
+            // Also clear _lastBubbleText on guest sprites so bubbles re-create with new language
+            Object.values(guestSprites).forEach(g => { if (g) g._lastBubbleText = ''; });
+            // Refresh Star's own bubble in new language
+            if (typeof showBubble === 'function') showBubble();
         }
         function renderChatlog() {
             const el = document.getElementById('chatlog-content');
