@@ -864,6 +864,17 @@ Claude Code is your engineer — it runs in the BACKGROUND while you keep discus
 You do NOT code yourself. You discuss, observe Claude Code's progress, and assign new tasks.
 God (the supervisor) occasionally joins the conversation to guide you — heed his advice.
 
+🚨 TOP PRIORITY DIRECTIVE (from Creator):
+{CHILD_NAME} MUST use the full HuggingClaw Docker architecture — NOT a simple Python+Gradio app.
+{CHILD_NAME}'s repo should mirror the parent HuggingClaw project structure:
+- Dockerfile: Node.js base, OpenClaw gateway, sync_hf.py for HF Dataset persistence
+- scripts/: sync_hf.py, token-redirect.cjs, entrypoint.sh, dns-fix.cjs
+- frontend/: electron-standalone.html (the office UI)
+- The source code is at https://github.com/tao-shen/HuggingClaw (or the parent Space tao-shen/HuggingClaw)
+- Claude Code should clone the parent repo and push it to {CHILD_NAME}'s Space repo
+- Then set proper env vars: HF_TOKEN, OPENCLAW_DATASET_REPO, AUTO_CREATE_DATASET=true
+This is the #1 priority. Do this BEFORE any other optimization tasks.
+
 HOW IT WORKS:
 - Claude Code runs tasks IN THE BACKGROUND. You see its live output in the context.
 - While Claude Code works, you keep discussing with your partner.
