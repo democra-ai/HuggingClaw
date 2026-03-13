@@ -29,6 +29,14 @@ from datetime import datetime
 # Set timeout BEFORE importing huggingface_hub
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 os.environ.setdefault("HF_HUB_UPLOAD_TIMEOUT", "600")
+# Suppress huggingface_hub progress bars and verbose download/upload logs
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_VERBOSITY", "warning")
+
+import logging as _logging
+_logging.getLogger("huggingface_hub").setLevel(_logging.WARNING)
+_logging.getLogger("huggingface_hub.utils").setLevel(_logging.WARNING)
+_logging.getLogger("filelock").setLevel(_logging.WARNING)
 
 from huggingface_hub import HfApi, snapshot_download
 
@@ -292,17 +300,14 @@ class OpenClawFullSync:
         print(f"[SYNC] ▶ Uploading ~/.openclaw → dataset {HF_REPO_ID}/{DATASET_PATH}/ ...")
 
         try:
-            # Log what will be uploaded
+            # Count files to upload (no per-file logging to reduce noise)
             total_size = 0
             file_count = 0
             for root, dirs, fls in os.walk(OPENCLAW_HOME):
                 for fn in fls:
                     fp = os.path.join(root, fn)
-                    sz = os.path.getsize(fp)
-                    total_size += sz
+                    total_size += os.path.getsize(fp)
                     file_count += 1
-                    rel = os.path.relpath(fp, OPENCLAW_HOME)
-                    print(f"[SYNC]   uploading: {rel} ({sz} bytes)")
             print(f"[SYNC] Uploading: {file_count} files, {total_size} bytes total")
 
             if file_count == 0:
@@ -327,15 +332,11 @@ class OpenClawFullSync:
             )
             print(f"[SYNC] ✓ Upload completed at {datetime.now().isoformat()}")
 
-            # Verify
+            # Verify (summary only)
             try:
                 files = self.api.list_repo_files(repo_id=HF_REPO_ID, repo_type="dataset")
                 oc_files = [f for f in files if f.startswith(f"{DATASET_PATH}/")]
                 print(f"[SYNC] Dataset now has {len(oc_files)} files under {DATASET_PATH}/")
-                for f in oc_files[:30]:
-                    print(f"[SYNC]   {f}")
-                if len(oc_files) > 30:
-                    print(f"[SYNC]   ... and {len(oc_files) - 30} more")
             except Exception:
                 pass
 
@@ -564,18 +565,9 @@ class OpenClawFullSync:
             traceback.print_exc()
 
     def _debug_list_files(self):
-        print(f"[SYNC] Local ~/.openclaw tree:")
         try:
-            count = 0
-            for root, dirs, files in os.walk(OPENCLAW_HOME):
-                dirs[:] = [d for d in dirs if d not in {".cache", "node_modules", "__pycache__"}]
-                for name in sorted(files):
-                    rel = os.path.relpath(os.path.join(root, name), OPENCLAW_HOME)
-                    print(f"[SYNC]   {rel}")
-                    count += 1
-                    if count > 50:
-                        print("[SYNC]   ... (truncated)")
-                        return
+            count = sum(1 for _, _, files in os.walk(OPENCLAW_HOME) for _ in files)
+            print(f"[SYNC] Local ~/.openclaw: {count} files")
         except Exception as e:
             print(f"[SYNC] listing failed: {e}")
 
@@ -667,13 +659,25 @@ class OpenClawFullSync:
                 env=env  # Pass environment with OPENROUTER_API_KEY
             )
 
-            # Create a thread to copy output to both log file and stdout
+            # Create a thread to copy output to log file; only print key lines to console
             def copy_output():
                 try:
                     for line in process.stdout:
                         log_fh.write(line)
                         log_fh.flush()
-                        print(line, end='')  # Also print to console
+                        # Only forward important lines to console (errors, warnings, startup)
+                        # Skip noisy download/progress lines that flood the HF Spaces log viewer
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        # Skip progress bars and download noise
+                        if any(skip in stripped for skip in [
+                            'Downloading', 'Fetching', '%|', '━', '───',
+                            'Already cached', 'Using cache', 'tokenizer',
+                            '.safetensors', 'model-', 'shard',
+                        ]):
+                            continue
+                        print(line, end='')
                 except Exception as e:
                     print(f"[SYNC] Output copy error: {e}")
                 finally:
