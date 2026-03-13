@@ -236,15 +236,27 @@ def action_restart():
         return f"Restart failed: {e}"
 
 
+def action_delete_env(key):
+    """Delete an environment variable from the child's Space (fixes CONFIG_ERROR collisions)."""
+    try:
+        hf_api.delete_space_variable(CHILD_SPACE_ID, key)
+        return f"Deleted variable {key} from {CHILD_NAME}'s Space. Use [ACTION: restart] to apply."
+    except Exception as e:
+        return f"Error deleting variable {key}: {e}"
+
+
 def action_get_env():
-    """List environment variables and secrets on the child's Space."""
+    """List environment variables and secrets on the child's Space, flag collisions."""
     try:
         lines = [f"{CHILD_NAME}'s environment:"]
+        var_names = set()
+        secret_names = set()
         vars_dict = hf_api.get_space_variables(CHILD_SPACE_ID)
         if vars_dict:
             lines.append("  Variables:")
             for k, v in vars_dict.items():
                 lines.append(f"    {k} = {v.value}")
+                var_names.add(k)
         info = hf_api.space_info(CHILD_SPACE_ID)
         if hasattr(info, 'runtime') and info.runtime and hasattr(info.runtime, 'secrets'):
             secrets = info.runtime.secrets
@@ -252,6 +264,13 @@ def action_get_env():
                 lines.append("  Secrets (values hidden):")
                 for s in secrets:
                     lines.append(f"    {s} = ****")
+                    secret_names.add(s)
+        # Detect collisions (cause of CONFIG_ERROR)
+        collisions = var_names & secret_names
+        if collisions:
+            lines.append(f"\n  ⚠️ COLLISION DETECTED: {', '.join(collisions)}")
+            lines.append(f"  These names exist as BOTH Variables AND Secrets!")
+            lines.append(f"  Fix: [ACTION: delete_env:{list(collisions)[0]}] then [ACTION: restart]")
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -634,6 +653,13 @@ def parse_and_execute_turn(raw_text, ctx):
         result = action_restart()
         results.append({"action": "restart", "result": result})
 
+    # 3b. Handle [ACTION: delete_env:KEY] (fix CONFIG_ERROR collisions)
+    del_env_match = re.search(r'\[ACTION:\s*delete_env:([^\]]+)\]', raw_text)
+    if del_env_match:
+        key = del_env_match.group(1).strip()
+        result = action_delete_env(key)
+        results.append({"action": f"delete_env:{key}", "result": result})
+
     # 4. Handle [ACTION: send_bubble:...] (parent-child communication)
     bubble_match = re.search(r'\[ACTION:\s*send_bubble:([^\]]+)\]', raw_text)
     if bubble_match:
@@ -680,10 +706,9 @@ You do NOT read files or write code yourself. You analyze the situation and give
 IMPORTANT KNOWLEDGE — HuggingFace Spaces CONFIG_ERROR:
 - "Collision on variables and secrets names" means a HF Space has an ENVIRONMENT VARIABLE and a SECRET with the SAME NAME.
 - This is NOT about duplicate JSON keys. It's about the HF Space settings page.
-- Fix: use [ACTION: restart] after identifying which env var names collide with secret names.
-- The env vars and secrets are shown in the context below. Look for names that appear in BOTH the Variables and Secrets lists.
-- To fix: the colliding variable or secret needs to be removed. Claude Code cannot do this — use the discussion to identify the collision, then tell your partner.
-- Actually, this may require manual intervention via HF API. Discuss what you find.
+- Fix: use [ACTION: delete_env:COLLIDING_KEY] to remove the duplicate variable, then [ACTION: restart].
+- The env vars and secrets are shown in the auto-gathered context. Look for ⚠️ COLLISION DETECTED.
+- Example: if OPENAI_API_KEY appears in both Variables and Secrets → [ACTION: delete_env:OPENAI_API_KEY] then [ACTION: restart]
 
 AVAILABLE ACTIONS:
   [TASK]
@@ -692,6 +717,7 @@ AVAILABLE ACTIONS:
   [/TASK]
 
   [ACTION: restart]              — Restart {CHILD_NAME}'s Space
+  [ACTION: delete_env:KEY]       — Delete an environment variable (fixes CONFIG_ERROR collisions!)
   [ACTION: send_bubble:MESSAGE]  — Send a message to {CHILD_NAME}
   [ACTION: create_child]         — Create {CHILD_NAME} (if not born)
 
