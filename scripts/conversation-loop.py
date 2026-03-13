@@ -1119,6 +1119,8 @@ Priority: SURVIVAL first, then CAPABILITY. A dead child can't learn.
 - OOM (Exit code 137) means reduce model/dependency size, NOT remove gradio. Gradio itself is lightweight (~50MB).
 - ⚠️ HF Spaces Docker SDK may OVERRIDE the base image Python version. Changing `FROM python:3.X` in Dockerfile does NOT guarantee that Python version runs. If a dependency fails due to Python version incompatibility (e.g. pydub needing pyaudioop removed in 3.13), the CORRECT fix is to REMOVE or REPLACE that dependency — NOT keep rewriting the Dockerfile.
 - If you've tried the same fix 3+ times and the error persists, CHANGE STRATEGY. Try removing the problematic dependency, using an alternative library, or wrapping the import in try/except.
+- If a removed dependency STILL appears in runtime errors, it is cached in Docker layers or installed as a transitive dep. Fix: add `RUN pip uninstall -y PACKAGE 2>/dev/null; true` AFTER `pip install` in Dockerfile. Also grep ALL code files for `import PACKAGE` and either remove or wrap in try/except.
+- NEVER install torch or transformers unless absolutely required — they are 2GB+ and cause OOM on free-tier Spaces. Use lightweight alternatives.
 
 MULTI-ACTION STRATEGY:
 You can use UP TO 5 actions per turn. Use this to work efficiently:
