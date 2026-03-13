@@ -35,6 +35,9 @@ RUN echo "[build] Installing A2A gateway..." && START=$(date +%s) \
   && npm install --production \
   && echo "[build] A2A gateway: $(($(date +%s) - START))s"
 
+# ── Coding Agent Extension (local — no git clone needed) ─────────────────────
+COPY --chown=node:node extensions/coding-agent /app/openclaw/extensions/coding-agent
+
 # ── Prepare runtime dirs ────────────────────────────────────────────────────
 RUN mkdir -p /app/openclaw/empty-bundled-plugins \
   && node -e "try{console.log(require('/app/openclaw/package.json').version)}catch(e){console.log('unknown')}" > /app/openclaw/.version \
@@ -43,6 +46,7 @@ RUN mkdir -p /app/openclaw/empty-bundled-plugins \
 # ── Scripts + Config + Frontend ──────────────────────────────────────────────
 COPY --chown=node:node scripts /home/node/scripts
 COPY --chown=node:node frontend /home/node/frontend
+COPY --chown=node:node workspace-templates /home/node/workspace-templates
 COPY --chown=node:node openclaw.json /home/node/scripts/openclaw.json.default
 RUN chmod +x /home/node/scripts/entrypoint.sh /home/node/scripts/sync_hf.py \
   && VERSION_TS=$(date +%s) \

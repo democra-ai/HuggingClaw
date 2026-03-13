@@ -507,10 +507,24 @@ class OpenClawFullSync:
 
             # Plugin whitelist
             data.setdefault("plugins", {}).setdefault("entries", {})
-            plugin_allow = ["telegram", "whatsapp"]
+            plugin_allow = ["telegram", "whatsapp", "coding-agent"]
             if A2A_PEERS:
                 plugin_allow.append("a2a-gateway")
             data["plugins"]["allow"] = plugin_allow
+
+            # ── Coding Agent Plugin Configuration ──
+            CODING_TARGET_SPACE = os.environ.get("CODING_AGENT_TARGET_SPACE", "")
+            CODING_TARGET_DATASET = os.environ.get("CODING_AGENT_TARGET_DATASET", "")
+            if CODING_TARGET_SPACE:
+                data["plugins"]["entries"]["coding-agent"] = {
+                    "enabled": True,
+                    "config": {
+                        "targetSpace": CODING_TARGET_SPACE,
+                        "targetDataset": CODING_TARGET_DATASET,
+                        "hfToken": HF_TOKEN or "",
+                    }
+                }
+                print(f"[SYNC] Coding agent configured: space={CODING_TARGET_SPACE}, dataset={CODING_TARGET_DATASET}")
             if "telegram" not in data["plugins"]["entries"]:
                 data["plugins"]["entries"]["telegram"] = {"enabled": True}
             elif isinstance(data["plugins"]["entries"]["telegram"], dict):
@@ -561,6 +575,23 @@ class OpenClawFullSync:
             with open(config_path, "w") as f:
                 json.dump(data, f, indent=2)
             print("[SYNC] Config patched and saved.")
+
+            # ── Deploy workspace templates (coding agent identity) ──
+            workspace_dir = Path(OPENCLAW_HOME) / "workspace"
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            templates_dir = Path("/home/node/workspace-templates")
+            if templates_dir.exists():
+                for tmpl in templates_dir.glob("*.md"):
+                    target = workspace_dir / tmpl.name
+                    # Only write if file is default/empty (don't overwrite user customizations)
+                    should_write = not target.exists()
+                    if target.exists():
+                        content = target.read_text()
+                        should_write = "Fill this in" in content or len(content.strip()) < 50
+                    if should_write:
+                        text = tmpl.read_text().replace("{{AGENT_NAME}}", AGENT_NAME)
+                        target.write_text(text)
+                        print(f"[SYNC] Deployed workspace template: {tmpl.name}")
 
             # Fix paired devices scopes (OpenClaw 2026.2.19+ requires operator.write/read)
             # Delete old paired devices to force fresh auto-pair with correct scopes

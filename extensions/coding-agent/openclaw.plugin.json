@@ -1,0 +1,32 @@
+{
+  "id": "coding-agent",
+  "name": "Coding Agent",
+  "description": "HuggingFace Space coding tools — read, write, edit, search, and manage code on HF Spaces with syntax validation",
+  "version": "1.0.0",
+  "defaultConfig": {
+    "targetSpace": "",
+    "targetDataset": "",
+    "hfToken": ""
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "targetSpace": {
+        "type": "string",
+        "description": "HuggingFace Space repo ID to manage (e.g. tao-shen/HuggingClaw-Cain)"
+      },
+      "targetDataset": {
+        "type": "string",
+        "description": "HuggingFace Dataset repo ID for persistent data (e.g. tao-shen/HuggingClaw-Cain-data)"
+      },
+      "hfToken": {
+        "type": "string",
+        "description": "HuggingFace API token (or use HF_TOKEN env var)"
+      }
+    }
+  },
+  "uiHints": {
+    "hfToken": { "sensitive": true }
+  }
+}

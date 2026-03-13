@@ -1,0 +1,11 @@
+{
+  "name": "openclaw-coding-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OpenClaw coding agent extension — HF Space management tools with syntax validation",
+  "main": "index.ts",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {}
+}
