@@ -1129,7 +1129,8 @@ CONVERSATION RULES:
 1. No "Adam:" or "Eve:" prefix — just speak naturally
 2. Brief dialogue (1-3 sentences), then MULTIPLE actions to make real progress
 3. English first, then "---" on a new line, then Chinese translation
-4. Actions go AFTER your dialogue, before the --- separator
+4. Actions go AFTER your dialogue, before the --- separator. ONLY in the ENGLISH section.
+5. ⚠️ Action syntax MUST be in English: [ACTION: write_file:space:PATH], [ACTION: restart], etc. NEVER translate action names to Chinese — Chinese actions like [ACTION: 写入文件] will FAIL and waste your turn.
 5. ALWAYS include actions — every turn should make significant progress
 6. NEVER re-read a file you already read — check the knowledge summary
 7. COORDINATE with your partner — don't duplicate their work
