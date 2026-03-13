@@ -350,6 +350,11 @@ def action_write_file(target, path, content):
 
 def action_set_env(key, value):
     """Set an environment variable on the child's Space."""
+    # Block shell expressions — LLM sometimes writes $(cmd) or backticks as values
+    if '$(' in value or '`' in value or value.startswith('$('):
+        return (f"⛔ BLOCKED: Value contains shell expression which won't be evaluated. "
+                f"Provide the actual value, not a shell command. "
+                f"HF_TOKEN is already set as a secret — use [ACTION: get_env] to check.")
     try:
         hf_api.add_space_variable(CHILD_SPACE_ID, key, value)
         return f"✓ Set env var {key}={value} on {CHILD_NAME}'s Space"
@@ -367,14 +372,24 @@ def action_set_secret(key, value):
 
 
 def action_get_env():
-    """List environment variables on the child's Space."""
+    """List environment variables and secrets on the child's Space."""
     try:
+        lines = [f"{CHILD_NAME}'s environment:"]
         vars_dict = hf_api.get_space_variables(CHILD_SPACE_ID)
-        if not vars_dict:
-            return f"{CHILD_NAME} has no environment variables set."
-        lines = [f"{CHILD_NAME}'s environment variables:"]
-        for k, v in vars_dict.items():
-            lines.append(f"  {k} = {v.value}")
+        if vars_dict:
+            lines.append("  Variables:")
+            for k, v in vars_dict.items():
+                lines.append(f"    {k} = {v.value}")
+        # Also check secrets (names only, values hidden)
+        info = hf_api.space_info(CHILD_SPACE_ID)
+        if hasattr(info, 'runtime') and info.runtime and hasattr(info.runtime, 'secrets'):
+            secrets = info.runtime.secrets
+            if secrets:
+                lines.append("  Secrets (values hidden):")
+                for s in secrets:
+                    lines.append(f"    {s} = ****")
+        if len(lines) == 1:
+            return f"{CHILD_NAME} has no environment variables or secrets set."
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
