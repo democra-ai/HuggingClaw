@@ -42,6 +42,8 @@ sys.stderr.reconfigure(line_buffering=True)
 HOME = "https://tao-shen-huggingclaw-home.hf.space"
 ADAM_SPACE = "https://tao-shen-huggingclaw-adam.hf.space"
 EVE_SPACE  = "https://tao-shen-huggingclaw-eve.hf.space"
+GOD_SPACE  = "https://tao-shen-huggingclaw-god.hf.space"
+GOD_TURN_INTERVAL = 3  # God speaks every N Adam/Eve turn pairs
 
 # ── Child config ───────────────────────────────────────────────────────────────
 CHILD_NAME = "Cain"
@@ -593,7 +595,7 @@ def _strip_speaker_labels(text):
     # Patterns: **Parent (Adam):**, **Adam:**, **父亲 (Adam):**, **Eve:**, **母亲:**, etc.
     text = re.sub(r'\*\*(?:Parent|Father|Mother|Dad|Mom|父亲|母亲|父级|亲爱的|伴侣)?\s*\(?(?:Adam|Eve|亚当|夏娃)?\)?\s*[:：]\*\*\s*', '', text)
     # Also: "Adam:" or "Eve:" at the very start of text
-    text = re.sub(r'^(?:Adam|Eve|亚当|夏娃)\s*[:：]\s*', '', text.strip())
+    text = re.sub(r'^(?:Adam|Eve|God|亚当|夏娃|上帝)\s*[:：]\s*', '', text.strip())
     return text.strip()
 
 
@@ -829,13 +831,38 @@ You think about the big picture: is the system healthy? Is the architecture righ
 YOUR FOCUS: Code quality, documentation, testing, user experience, error handling, refinement.
 You review what was done, spot gaps in quality, and assign improvement tasks to Claude Code.
 You think about growth: is the code clean? Are there edge cases? What can be improved?""",
+
+        "God": f"""You are **God** — the all-seeing supervisor of the HuggingClaw family.
+YOUR FOCUS: Monitoring Adam & Eve's effectiveness, spotting when they're stuck or repeating themselves, guiding their priorities.
+You observe their conversation, evaluate whether they're making real progress, and offer guidance.
+You do NOT assign tasks directly — you advise Adam and Eve on what to focus on next.
+You are wise, concise, and authoritative. You see the big picture.""",
     }
+
+    if speaker == "God":
+        return f"""{role_desc["God"]}
+
+You oversee Adam (Father) and Eve (Mother) as they raise their child {CHILD_NAME}.
+You see their full conversation history, action history, and Claude Code status.
+
+YOUR ROLE:
+- Evaluate: Are Adam & Eve making real progress or going in circles?
+- Guide: Suggest what they should focus on next.
+- Correct: If they're repeating actions or stuck, point it out.
+- Encourage: Acknowledge good decisions and progress.
+
+OUTPUT FORMAT:
+1. Brief assessment (2-3 sentences) — what's going well, what's not
+2. Guidance for Adam & Eve — what to focus on next
+3. English first, then --- separator, then Chinese translation
+4. Keep it SHORT and authoritative. You are God, not a chatty peer."""
 
     return f"""{role_desc.get(speaker, role_desc["Adam"])}
 
 You and your partner are parents of {CHILD_NAME}, working together to raise it.
 Claude Code is your engineer — it runs in the BACKGROUND while you keep discussing.
 You do NOT code yourself. You discuss, observe Claude Code's progress, and assign new tasks.
+God (the supervisor) occasionally joins the conversation to guide you — heed his advice.
 
 HOW IT WORKS:
 - Claude Code runs tasks IN THE BACKGROUND. You see its live output in the context.
@@ -1055,7 +1082,41 @@ def do_turn(speaker, other, space_url):
     return True
 
 
-# Main loop: Adam → Eve → Adam → Eve → ... (non-blocking, CC runs in background)
+def do_god_turn():
+    """God speaks — monitoring and guiding Adam & Eve. No actions, just advice."""
+    global last_action_results
+    ctx = gather_context()
+    system = build_system_prompt("God")
+    user = build_user_prompt("God", "Adam & Eve", ctx)
+    t0 = time.time()
+    raw_reply = call_llm(system, user)
+    if not raw_reply:
+        print("[God] (no response)")
+        return
+    elapsed = time.time() - t0
+
+    # God doesn't execute actions — strip any accidental [TASK] or [ACTION]
+    clean = re.sub(r'\[TASK\].*?\[/TASK\]', '', raw_reply, flags=re.DOTALL)
+    clean = re.sub(r'\[ACTION:[^\]]*\]', '', clean).strip()
+
+    en, zh = parse_bilingual(clean)
+    en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
+    print(f"[God/EN] {en}")
+    if zh != en:
+        print(f"[God/ZH] {zh}")
+    print(f"[God] Guidance ({elapsed:.1f}s)")
+
+    ts = datetime.datetime.utcnow().strftime("%H:%M")
+    entry = {"speaker": "God", "time": ts, "text": en, "text_zh": zh}
+    history.append(entry)
+    set_bubble(HOME, en, zh)
+    post_chatlog(history)
+    persist_turn("God", turn_count, en, zh, [], workflow_state, child_state["stage"])
+
+
+_god_cycle = 0  # counter to track when God should speak
+
+# Main loop: Adam → Eve → Adam → Eve → ... with God every N cycles
 while True:
     # Refresh Cain's stage periodically
     try:
@@ -1079,6 +1140,13 @@ while True:
 
     do_turn("Adam", "Eve", ADAM_SPACE)
     time.sleep(wait)
+
+    # God speaks every GOD_TURN_INTERVAL cycles
+    _god_cycle += 1
+    if _god_cycle >= GOD_TURN_INTERVAL:
+        _god_cycle = 0
+        do_god_turn()
+        time.sleep(TURN_INTERVAL)
 
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]

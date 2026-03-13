@@ -468,6 +468,7 @@
         }
         #chatlog-content .chat-msg .chat-speaker.adam { color: #f87171; }
         #chatlog-content .chat-msg .chat-speaker.eve { color: #a78bfa; }
+        #chatlog-content .chat-msg .chat-speaker.god { color: #fbbf24; }
         #chatlog-content .chat-msg .chat-time { color: #6b7280; font-size: 0.85em; }
         #game-container {
             position: relative;
@@ -5102,8 +5103,8 @@ function toggleBrokerPanel() {
             star.setVisible(true);
             star.anims.play('star_idle', true);
 
-            // Name label above Star character — Star is always HuggingClaw
-            window._starNameLabel = game.add.text(areas.breakroom.x, areas.breakroom.y - 140, 'HuggingClaw', {
+            // Name label above Star character — God (supervisor)
+            window._starNameLabel = game.add.text(areas.breakroom.x, areas.breakroom.y - 140, 'God', {
                 fontFamily: 'ArkPixel, monospace',
                 fontSize: '15px',
                 fill: '#ffffff',
