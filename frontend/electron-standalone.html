@@ -4440,34 +4440,26 @@ function toggleBrokerPanel() {
             return { x: randomInt(rect.x1, rect.x2), y: randomInt(rect.y1, rect.y2) };
         }
 
-        function getAreaPoint(area, idx) {
-            // 非 demo 访客：仍用固定点位，避免每次轮询都抖动。
-            const map = {
-                breakroom: [
-                    { x: 511, y: 262 },
-                    { x: 841, y: 621 },
-                    { x: 690, y: 470 }
-                ],
-                writing: [
-                    { x: 190, y: 526 },
-                    { x: 380, y: 683 },
-                    { x: 300, y: 610 }
-                ],
-                error: [
-                    { x: 932, y: 275 },
-                    { x: 1109, y: 327 },
-                    { x: 1020, y: 305 }
-                ]
-            };
-            const arr = map[area] || map.breakroom;
-            return arr[idx % arr.length];
+        // 每个 agent 独立的漫游计时器和当前目标，避免轮询抖动
+        const guestWanderState = {}; // agentId -> { area, targetX, targetY, lastMoveAt }
+        const WANDER_INTERVAL = 4500; // 每 4.5s 换一次目标位置
+
+        function getWanderPoint(agentId, area) {
+            const now = Date.now();
+            const ws = guestWanderState[agentId];
+            if (ws && ws.area === area && (now - ws.lastMoveAt) < WANDER_INTERVAL) {
+                return { x: ws.targetX, y: ws.targetY };
+            }
+            const rect = getAreaRect(area);
+            const p = randomPointInRect(rect);
+            guestWanderState[agentId] = { area, targetX: p.x, targetY: p.y, lastMoveAt: now };
+            return p;
         }
 
         function renderGuestAgentsInScene() {
             if (!game) return;
             const visitors = getMergedVisitors();
             const seenIds = new Set();
-            let idxBreak = 0, idxWrite = 0, idxError = 0;
 
             visitors.forEach(agent => {
                 const id = agent.agentId;
@@ -4476,10 +4468,8 @@ function toggleBrokerPanel() {
                 const isDemo = !!agent.isDemo || (DEMO_MODE && (id === 'demo_nika' || id === 'demo_mercury' || agent.name === '尼卡' || agent.name === '水星'));
                 const area = agent.area || (agent.state === 'error' ? 'error' : (agent.state === 'idle' ? 'breakroom' : 'writing'));
 
-                const idx = area === 'breakroom' ? idxBreak++ : area === 'error' ? idxError++ : idxWrite++;
-                const p = isDemo
-                    ? randomPointInRect(getAreaRect(area))
-                    : getAreaPoint(area, idx);
+                // 所有 agent 都在区域内漫游
+                const p = getWanderPoint(id, area);
 
                 if (!guestSprites[id]) {
                     // 优先用图标：demo visitor 有专门映射
@@ -4534,39 +4524,33 @@ function toggleBrokerPanel() {
                     const g = guestSprites[id];
                     const yOffset = (DEMO_MODE && (agent.agentId === 'demo_mercury' || agent.name === '水星')) ? 10 : 0;
 
-                    // demo：平滑移动（避免闪现）；非 demo：保持稳定位置（避免轮询抖动）
-                    if (isDemo) {
-                        // kill previous tweens for this id
-                        if (guestTweens[id] && guestTweens[id].move) {
-                            guestTweens[id].move.stop();
-                        }
-                        if (guestTweens[id] && guestTweens[id].name) {
-                            guestTweens[id].name.stop();
-                        }
+                    // 所有 agent 都使用平滑移动（tween），漫游位置由 getWanderPoint 控制节奏
+                    if (guestTweens[id] && guestTweens[id].move) {
+                        guestTweens[id].move.stop();
+                    }
+                    if (guestTweens[id] && guestTweens[id].name) {
+                        guestTweens[id].name.stop();
+                    }
 
-                        const duration = 2000 + Math.floor(Math.random() * 1000); // 2~3s 走路感
-                        const ease = 'Sine.easeInOut';
+                    const duration = 2000 + Math.floor(Math.random() * 1000);
+                    const ease = 'Sine.easeInOut';
+                    const nameYOffset = isDemo ? -80 : -105;
 
-                        const moveTween = game.tweens.add({
-                            targets: g.sprite,
-                            x: p.x,
-                            y: p.y + yOffset,
-                            duration,
-                            ease
-                        });
-                        const nameTween = game.tweens.add({
-                            targets: g.nameText,
-                            x: p.x,
-                            y: (p.y + yOffset) - 80,
-                            duration,
-                            ease
-                        });
-                        guestTweens[id] = { move: moveTween, name: nameTween };
-                    } else {
-                        g.sprite.x = p.x;
-                        g.sprite.y = p.y + yOffset;
-                        g.nameText.x = p.x;
-                        g.nameText.y = (p.y + yOffset) - 120;
+                    const moveTween = game.tweens.add({
+                        targets: g.sprite,
+                        x: p.x,
+                        y: p.y + yOffset,
+                        duration,
+                        ease
+                    });
+                    const nameTween = game.tweens.add({
+                        targets: g.nameText,
+                        x: p.x,
+                        y: (p.y + yOffset) + nameYOffset,
+                        duration,
+                        ease
+                    });
+                    guestTweens[id] = { move: moveTween, name: nameTween };
                     }
 
                     g.nameText.setText(agent.name || 'Guest');
@@ -4611,6 +4595,7 @@ function toggleBrokerPanel() {
                         try { guestTweens[id].name && guestTweens[id].name.stop(); } catch(e) {}
                         delete guestTweens[id];
                     }
+                    delete guestWanderState[id];
                 }
             });
         }
