@@ -25,8 +25,8 @@ The LLM decides what to do. Actions use [ACTION: ...] tags.
 # ║                                   │ │ Machine    ││                ║
 # ║  ┌─────────────┐                 │ │ BIRTH →    ││                ║
 # ║  │ ACTION      │ ◄───parsed───── │ │ DIAGNOSE → ││                ║
-# ║  │ PARSER      │   [ACTION:]     │ │ ACT →      ││                ║
-# ║  │ + 🔧🛠️ emoji │   or emoji     │ │ VERIFY →   ││                ║
+# ║  │ PARSER      │  [ACTION/操作]  │ │ ACT →      ││                ║
+# ║  │ + 🔧🛠️ emoji │  case-insens.  │ │ VERIFY →   ││                ║
 # ║  └──────┬──────┘                 │ │ MONITOR    ││                ║
 # ║         │                        │ └────────────┘│                ║
 # ║         ▼                        │ ┌────────────┐│                ║
@@ -409,9 +409,9 @@ def action_send_bubble(text):
 # ══════════════════════════════════════════════════════════════════════════════
 #  MODULE 3: ACTION PARSER — Extract and execute actions from LLM output
 #  Parse order: 1) [ACTION: write_file] with [CONTENT] block
-#               2) [ACTION: ...] standard tags (one per turn)
-#               3) 🔧emoji format fallback (LLM sometimes uses this)
-#  Safety guards applied: building-state, ACT-phase, knowledge dedup.
+#               2) [ACTION/Action/操作/动作: ...] tags (case-insensitive, one per turn)
+#               3) 🔧🛠️ emoji format fallback (LLM sometimes uses this)
+#  Safety guards applied: building-state, ACT-phase, knowledge dedup, shell-expr.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_and_execute_actions(raw_text):
@@ -420,10 +420,10 @@ def parse_and_execute_actions(raw_text):
     executed = set()  # Deduplicate
 
     # 1. Handle write_file with [CONTENT]...[/CONTENT] block
-    #    Tolerates: [ACTION: write_file:...], [write_file:...], missing ACTION: prefix,
+    #    Tolerates: [ACTION/Action/操作: write_file:...], [write_file:...], missing prefix,
     #    and [/CONTENT] with whitespace/newline before closing bracket
     write_match = re.search(
-        r'\[(?:ACTION:\s*)?write_file\s*:\s*(\w+)\s*:\s*([^\]]+)\]\s*\[CONTENT\](.*?)\[/\s*CONTENT\s*\]',
+        r'\[(?:(?:ACTION|Action|action|操作|动作)\s*[:：]\s*)?write_file\s*:\s*(\w+)\s*:\s*([^\]]+)\]\s*\[CONTENT\](.*?)\[/\s*CONTENT\s*\]',
         raw_text, re.DOTALL
     )
     if write_match:
@@ -435,8 +435,8 @@ def parse_and_execute_actions(raw_text):
             results.append({"action": key, "result": result})
             print(f"[ACTION] {key} → {result[:100]}")
 
-    # 2. Handle all [ACTION: ...] tags — deduplicate by action key
-    for match in re.finditer(r'\[ACTION:\s*([^\]]+)\]', raw_text):
+    # 2. Handle all [ACTION/Action/操作/动作: ...] tags — case-insensitive, multilingual
+    for match in re.finditer(r'\[(?:ACTION|Action|action|操作|动作)\s*[:：]\s*([^\]]+)\]', raw_text):
         action_str = match.group(1).strip()
 
         # Skip write_file (handled above)
@@ -574,7 +574,7 @@ def parse_and_execute_actions(raw_text):
                 print(f"[ACTION-emoji] {action_str} → {result[:120]}")
 
     # Clean the text: remove action tags, content blocks, and emoji actions
-    clean = re.sub(r'\[ACTION:[^\]]*\]', '', raw_text)
+    clean = re.sub(r'\[(?:ACTION|Action|action|操作|动作)\s*[:：][^\]]*\]', '', raw_text)
     clean = re.sub(r'\[CONTENT\].*?\[/CONTENT\]', '', clean, flags=re.DOTALL)
     clean = re.sub(r'[🔧🛠️]\ufe0f?\s*\w+(?::\S+)*', '', clean)
     clean = clean.strip()
