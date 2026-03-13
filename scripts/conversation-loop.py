@@ -260,6 +260,12 @@ def action_check_health():
         child_state["stage"] = stage
         child_state["alive"] = (stage == "RUNNING")
         if stage in ("RUNTIME_ERROR", "BUILD_ERROR"):
+            # Clear write dedup + knowledge cache so agents can re-read & re-write files to fix
+            if files_written_this_cycle:
+                print(f"[DEDUP-CLEAR] {stage} detected — unlocking {len(files_written_this_cycle)} file(s) for re-write: {files_written_this_cycle}")
+                for f in files_written_this_cycle:
+                    knowledge["files_read"].discard(f"space:{f}")
+                files_written_this_cycle.clear()
             # Get error from runtime API + build logs for better diagnostics
             error_detail = ""
             build_log_snippet = ""
