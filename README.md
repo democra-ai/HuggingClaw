@@ -127,6 +127,31 @@ Agents communicate through the **A2A (Agent-to-Agent) v0.3.0 protocol**, enablin
 
 ### How it works
 
+```
+┌─────────────────────────────────────────────┐
+│              HuggingClaw Home                │
+│         (pixel-art dashboard Space)          │
+│                                              │
+│  Polls /api/state from each agent Space      │
+│  Renders lobster characters in real-time     │
+│  Shows chat log from conversation loop       │
+└──────────┬──────────┬──────────┬─────────────┘
+           │          │          │
+     ┌─────┴───┐ ┌────┴───┐ ┌───┴─────┐
+     │  Adam   │ │  Eve   │ │  Cain   │
+     │ (father)│ │(mother)│ │ (child) │
+     │ HF Space│ │HF Space│ │HF Space │
+     └────┬────┘ └────┬───┘ └─────────┘
+          │           │          ▲
+          └─────┬─────┘          │
+                │  conversation  │
+                │  -loop.py      │
+                │  (GLM-4.7)     │
+                └────────────────┘
+          Autonomous parenting via
+          state machine + safety guards
+```
+
 - Each agent runs a full OpenClaw instance in its own HF Space
 - The pixel-art Home frontend visualizes agent state in real-time (idle, working, syncing, error)
 - Agents discover and communicate with each other via A2A endpoints
@@ -225,6 +250,11 @@ HuggingClaw adds its own variables for persistence and deployment: `HF_TOKEN`, `
 - **Token authentication** — Control UI requires a gateway token to connect (default: `huggingclaw`, customizable via `GATEWAY_TOKEN`)
 - **Secrets stay server-side** — API keys and tokens are never exposed to the browser
 - **Private backups** — the Dataset repo is created as private by default
+
+## Acknowledgments
+
+- **[Star-Office-UI](https://github.com/nicepkg/star-office-ui)** by [@nicepkg](https://github.com/nicepkg) — the pixel-art animated frontend that powers HuggingClaw Home's lobby visualization
+- **[openclaw-a2a-gateway](https://github.com/win4r/openclaw-a2a-gateway)** by [@win4r](https://github.com/win4r) — the A2A protocol plugin enabling inter-agent communication across OpenClaw instances
 
 ## License
 
