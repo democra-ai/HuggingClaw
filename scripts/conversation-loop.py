@@ -404,8 +404,10 @@ def parse_and_execute_actions(raw_text):
     executed = set()  # Deduplicate
 
     # 1. Handle write_file with [CONTENT]...[/CONTENT] block
+    #    Tolerates: [ACTION: write_file:...], [write_file:...], missing ACTION: prefix,
+    #    and [/CONTENT] with whitespace/newline before closing bracket
     write_match = re.search(
-        r'\[ACTION:\s*write_file\s*:\s*(\w+)\s*:\s*([^\]]+)\]\s*\[CONTENT\](.*?)\[/CONTENT\]',
+        r'\[(?:ACTION:\s*)?write_file\s*:\s*(\w+)\s*:\s*([^\]]+)\]\s*\[CONTENT\](.*?)\[/\s*CONTENT\s*\]',
         raw_text, re.DOTALL
     )
     if write_match:
@@ -494,9 +496,9 @@ def parse_and_execute_actions(raw_text):
             results.append({"action": action_str, "result": result})
             print(f"[ACTION] {action_str} → {result[:120]}")
 
-    # 3. Fallback: parse 🔧action:arg1:arg2 emoji format (LLM sometimes uses this)
+    # 3. Fallback: parse emoji action format (🔧 🛠️ etc.) — LLM sometimes uses this
     if not results:
-        for match in re.finditer(r'🔧\s*(\w+(?::\S+)*)', raw_text):
+        for match in re.finditer(r'[🔧🛠️]\ufe0f?\s*(\w+(?::\S+)*)', raw_text):
             action_str = match.group(1).strip()
             if action_str in executed:
                 continue
@@ -558,7 +560,7 @@ def parse_and_execute_actions(raw_text):
     # Clean the text: remove action tags, content blocks, and emoji actions
     clean = re.sub(r'\[ACTION:[^\]]*\]', '', raw_text)
     clean = re.sub(r'\[CONTENT\].*?\[/CONTENT\]', '', clean, flags=re.DOTALL)
-    clean = re.sub(r'🔧\s*\w+(?::\S+)*', '', clean)
+    clean = re.sub(r'[🔧🛠️]\ufe0f?\s*\w+(?::\S+)*', '', clean)
     clean = clean.strip()
 
     return clean, results
