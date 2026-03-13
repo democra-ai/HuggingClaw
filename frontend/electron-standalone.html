@@ -468,6 +468,7 @@
         }
         #chatlog-content .chat-msg .chat-speaker.adam { color: #f87171; }
         #chatlog-content .chat-msg .chat-speaker.eve { color: #a78bfa; }
+        #chatlog-content .chat-msg .chat-time { color: #6b7280; font-size: 0.85em; }
         #game-container {
             position: relative;
             border: 0;
@@ -5647,7 +5648,8 @@ function toggleBrokerPanel() {
             el.innerHTML = chatlogCache.slice().reverse().map(m => {
                 const cls = (m.speaker || '').toLowerCase();
                 const text = chatLang === 'zh' ? (m.text_zh || m.text || '') : (m.text || '');
-                return `<div class="chat-msg"><span class="chat-speaker ${cls}">${m.speaker}:</span> ${text}</div>`;
+                const timeStr = m.time ? `<span class="chat-time">${m.time}</span> ` : '';
+                return `<div class="chat-msg">${timeStr}<span class="chat-speaker ${cls}">${m.speaker}:</span> ${text}</div>`;
             }).join('');
             el.scrollTop = 0;
         }

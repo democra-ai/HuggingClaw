@@ -237,10 +237,20 @@ def action_restart():
 
 
 def action_delete_env(key):
-    """Delete an environment variable from the child's Space (fixes CONFIG_ERROR collisions)."""
+    """Delete an environment variable — ONLY if it collides with a secret (safety check)."""
     try:
+        # Safety: only allow deleting variables that collide with secrets
+        vars_dict = hf_api.get_space_variables(CHILD_SPACE_ID)
+        if key not in (vars_dict or {}):
+            return f"BLOCKED: Variable '{key}' does not exist. Nothing to delete."
+        info = hf_api.space_info(CHILD_SPACE_ID)
+        secret_names = set()
+        if hasattr(info, 'runtime') and info.runtime and hasattr(info.runtime, 'secrets'):
+            secret_names = set(info.runtime.secrets or [])
+        if key not in secret_names:
+            return f"BLOCKED: Variable '{key}' does NOT collide with a secret. Refusing to delete a non-colliding variable."
         hf_api.delete_space_variable(CHILD_SPACE_ID, key)
-        return f"Deleted variable {key} from {CHILD_NAME}'s Space. Use [ACTION: restart] to apply."
+        return f"Deleted colliding variable '{key}' from {CHILD_NAME}'s Space. Use [ACTION: restart] to apply."
     except Exception as e:
         return f"Error deleting variable {key}: {e}"
 
@@ -503,6 +513,15 @@ def call_llm(system_prompt, user_prompt):
 
 def _has_chinese(s):
     return bool(re.search(r'[\u4e00-\u9fff]', s))
+
+def _strip_speaker_labels(text):
+    """Remove redundant speaker self-references like **Parent (Adam):** or **Eve:** etc."""
+    # Patterns: **Parent (Adam):**, **Adam:**, **父亲 (Adam):**, **Eve:**, **母亲:**, etc.
+    text = re.sub(r'\*\*(?:Parent|Father|Mother|Dad|Mom|父亲|母亲|父级|亲爱的|伴侣)?\s*\(?(?:Adam|Eve|亚当|夏娃)?\)?\s*[:：]\*\*\s*', '', text)
+    # Also: "Adam:" or "Eve:" at the very start of text
+    text = re.sub(r'^(?:Adam|Eve|亚当|夏娃)\s*[:：]\s*', '', text.strip())
+    return text.strip()
+
 
 def parse_bilingual(text):
     """Parse bilingual response into (en, zh)."""
@@ -831,6 +850,7 @@ if reply:
     clean, actions = parse_and_execute_turn(reply, ctx)
     last_action_results = actions
     en, zh = parse_bilingual(clean)
+    en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
     print(f"[Adam/EN] {en}")
     if zh != en:
         print(f"[Adam/ZH] {zh}")
@@ -839,7 +859,9 @@ if reply:
         if ar['action'] == 'claude_code':
             result_preview = ar['result'][:800].replace('\n', '\n  ')
             print(f"  [CC-RESULT] {result_preview}")
-    entry = {"speaker": "Adam", "text": en, "text_zh": zh}
+    import datetime
+    ts = datetime.datetime.utcnow().strftime("%H:%M")
+    entry = {"speaker": "Adam", "time": ts, "text": en, "text_zh": zh}
     if actions:
         labels = " ".join(f"🔧{ar['action'].split(':')[0]}" for ar in actions)
         entry["text"] = f"{en} {labels}"
@@ -888,6 +910,7 @@ def do_turn(speaker, other, space_url):
     last_action_results = action_results
 
     en, zh = parse_bilingual(clean_text)
+    en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
     print(f"[{speaker}/EN] {en}")
     if zh != en:
         print(f"[{speaker}/ZH] {zh}")
@@ -902,12 +925,16 @@ def do_turn(speaker, other, space_url):
     else:
         print(f"[{speaker}] Turn #{turn_count}: no task assigned ({elapsed:.1f}s)")
 
-    # Add to history
+    # Add to history with timestamp
+    import datetime
+    ts = datetime.datetime.utcnow().strftime("%H:%M")
+    entry = {"speaker": speaker, "time": ts}
     if action_results:
         labels = " ".join(f"🔧{ar['action'].split(':')[0]}" for ar in action_results)
-        history.append({"speaker": speaker, "text": f"{en} {labels}", "text_zh": f"{zh} {labels}"})
+        entry.update({"text": f"{en} {labels}", "text_zh": f"{zh} {labels}"})
     else:
-        history.append({"speaker": speaker, "text": en, "text_zh": zh})
+        entry.update({"text": en, "text_zh": zh})
+    history.append(entry)
 
     set_bubble(space_url, en, zh)
     post_chatlog(history)
