@@ -18,7 +18,7 @@ The LLM decides what to do. Actions use [ACTION: ...] tags.
 # ║                                                                    ║
 # ║  ┌─────────────┐    LLM API     ┌────────────────┐                ║
 # ║  │  Zhipu GLM  │ ◄────────────► │ CONVERSATION   │                ║
-# ║  │  (glm-4.5)  │   system +     │ ENGINE         │                ║
+# ║  │  (glm-4.7)  │   system +     │ ENGINE         │                ║
 # ║  └─────────────┘   user prompt   │                │                ║
 # ║                                   │ ┌────────────┐│                ║
 # ║                                   │ │ State      ││                ║
@@ -26,7 +26,7 @@ The LLM decides what to do. Actions use [ACTION: ...] tags.
 # ║  ┌─────────────┐                 │ │ BIRTH →    ││                ║
 # ║  │ ACTION      │ ◄───parsed───── │ │ DIAGNOSE → ││                ║
 # ║  │ PARSER      │   [ACTION:]     │ │ ACT →      ││                ║
-# ║  │ + 🔧 emoji  │   or 🔧emoji    │ │ VERIFY →   ││                ║
+# ║  │ + 🔧🛠️ emoji │   or emoji     │ │ VERIFY →   ││                ║
 # ║  └──────┬──────┘                 │ │ MONITOR    ││                ║
 # ║         │                        │ └────────────┘│                ║
 # ║         ▼                        │ ┌────────────┐│                ║
@@ -53,6 +53,7 @@ The LLM decides what to do. Actions use [ACTION: ...] tags.
 # ║  3. Knowledge dedup: block re-reading already-read files           ║
 # ║  4. Config sanitizer: strip invalid openclaw.json keys             ║
 # ║  5. Forced transitions: prevent infinite DIAGNOSE/VERIFY loops     ║
+# ║  6. Shell-expression guard: block $(cmd) in set_env values         ║
 # ║                                                                    ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 """
