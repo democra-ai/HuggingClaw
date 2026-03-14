@@ -1,48 +1,49 @@
 #!/usr/bin/env python3 -u
 """
-Adam & Eve — Claude Code Orchestrators for their child Cain.
+Adam & Eve — A2A-based Agent Orchestrator for their child Cain.
 
-Architecture: Adam/Eve (Zhipu GLM) gather context and craft task prompts,
-then delegate ALL coding work to Claude Code CLI.
+Architecture: Adam/Eve are OpenClaw instances communicating via Google A2A protocol.
+Each has its own personality (SOUL.md), memory system, and LLM backend.
+This script is a lightweight coordinator — it sends context via A2A, parses
+responses for [TASK] blocks, and delegates coding work to Claude Code CLI.
 
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║                    SYSTEM ARCHITECTURE (v3)                        ║
+# ║                    SYSTEM ARCHITECTURE (v4 — A2A)                  ║
 # ╠══════════════════════════════════════════════════════════════════════╣
 # ║                                                                    ║
-# ║  ┌─────────────┐    discuss     ┌────────────────┐                ║
-# ║  │  Zhipu GLM  │ ◄───────────► │ Adam & Eve     │                ║
-# ║  │  (glm-4.5)  │  understand   │ (context +     │                ║
-# ║  └─────────────┘  situation    │  task prompt)  │                ║
-# ║                                 └───────┬────────┘                ║
-# ║                                         │ [TASK]                  ║
-# ║                                         ▼                         ║
-# ║                                 ┌────────────────┐                ║
-# ║  ┌─────────────┐               │ Claude Code    │                ║
-# ║  │ HuggingFace │ ◄──git push── │ CLI (worker)   │                ║
-# ║  │ Cain Space  │               │ (z.ai backend) │                ║
-# ║  └─────────────┘               └────────────────┘                ║
+# ║  ┌──────────────────┐  A2A   ┌──────────────────┐                ║
+# ║  │ Adam (OpenClaw)  │◄──────►│ Eve (OpenClaw)   │                ║
+# ║  │ HF Space + A2A   │        │ HF Space + A2A   │                ║
+# ║  │ own memory/SOUL  │        │ own memory/SOUL  │                ║
+# ║  └────────┬─────────┘        └────────┬─────────┘                ║
+# ║           │ [TASK]                    │ [TASK]                    ║
+# ║           ▼                           ▼                           ║
+# ║  ┌────────────────────────────────────────────┐                   ║
+# ║  │        conversation-loop.py                │                   ║
+# ║  │   (coordinator on Home Space)              │                   ║
+# ║  │   - sends context via A2A to agents        │                   ║
+# ║  │   - parses [TASK] → Claude Code CLI        │                   ║
+# ║  │   - manages chatlog, bubbles, frontend     │                   ║
+# ║  └──────────────────┬─────────────────────────┘                   ║
+# ║                     │ [TASK]                                       ║
+# ║                     ▼                                              ║
+# ║  ┌─────────────┐  ┌────────────────┐                              ║
+# ║  │ HuggingFace │◄─│ Claude Code    │                              ║
+# ║  │ Cain Space  │  │ CLI (worker)   │                              ║
+# ║  └─────────────┘  └────────────────┘                              ║
 # ║                                                                    ║
-# ║  ┌─────────────┐               ┌────────────────┐                ║
-# ║  │ HuggingFace │ ◄──git push── │ God            │                ║
-# ║  │ Home Space  │    (self-fix) │ (Claude Code)  │                ║
-# ║  └─────────────┘               │ monitors loop, │                ║
-# ║                                 │ fixes mechanism│                ║
-# ║                                 └────────────────┘                ║
-# ║  Parallel flow:                                                    ║
-# ║  DISCUSSION THREAD (every 15s):                                    ║
-# ║    Adam → Eve → Adam → Eve → ... (continuous)                     ║
-# ║    Each turn sees CC's live output + Cain's state                  ║
-# ║  CC WORKER THREAD (background):                                    ║
-# ║    Receives [TASK] → clone → analyze → fix → push                 ║
-# ║    Streams output to shared buffer for agents to discuss           ║
-# ║  GOD SUPERVISOR (every 3 cycles):                                  ║
-# ║    Claude Code CLI → reads chatlog → diagnoses issues →            ║
-# ║    fixes conversation-loop.py → pushes → Space restarts            ║
+# ║  ┌─────────────┐  ┌────────────────┐                              ║
+# ║  │ HuggingFace │◄─│ God (OpenClaw) │                              ║
+# ║  │ Home Space  │  │ supervisor     │                              ║
+# ║  └─────────────┘  └────────────────┘                              ║
+# ║                                                                    ║
+# ║  Flow: Adam(A2A) → Eve(A2A) → Adam(A2A) → ... (every 15s)       ║
+# ║  CC Worker: background thread, streams output to agents           ║
+# ║  God: every 2 min, monitors + fixes conversation-loop.py          ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 """
-import json, time, re, requests, sys, os, io, subprocess, threading, datetime
+import json, time, re, requests, sys, os, io, subprocess, threading, datetime, uuid
 from collections import deque
-from pathlib import Path
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -428,7 +429,9 @@ Your job: monitor Adam & Eve's conversation loop and fix mechanism issues.
 
 ## Architecture
 - Home Space runs conversation-loop.py which orchestrates the family
-- Adam & Eve converse via Zhipu GLM-4.5, assign [TASK] blocks to Claude Code CLI
+- Adam & Eve are OpenClaw instances communicating via A2A protocol
+- Each agent has its own memory and personality (SOUL.md) in OpenClaw
+- conversation-loop.py sends context via A2A, parses [TASK] → Claude Code CLI
 - Claude Code worker clones Cain's repo, makes changes, and pushes
 - You (God) monitor the conversation and fix the orchestration mechanism
 - All Spaces use sdk: docker (NOT gradio)
@@ -725,52 +728,76 @@ def enrich_task_with_context(task_desc, ctx):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MODULE 4: LLM & COMMUNICATION
+#  MODULE 4: A2A COMMUNICATION (Agent-to-Agent protocol)
 # ══════════════════════════════════════════════════════════════════════════════
+# Each agent (Adam, Eve, God) is an OpenClaw instance with its own personality
+# and memory. We communicate with them via A2A protocol instead of calling the
+# LLM directly. This lets each agent use OpenClaw's built-in memory, SOUL.md,
+# and reasoning — conversation-loop.py is just the coordinator.
 
-_rate_limited = False  # whether we are currently rate-limited (for logging only)
+def send_a2a_message(space_url, message_text, timeout=90):
+    """Send a message to an OpenClaw instance via A2A protocol.
 
-def call_llm(system_prompt, user_prompt):
-    """Call Zhipu LLM via Anthropic-compatible API. Returns "" on rate limit (no sleep)."""
-    global _rate_limited
+    Uses Google A2A protocol (JSON-RPC 2.0) to communicate with the agent's
+    OpenClaw instance. The agent processes the message using its own personality
+    (SOUL.md), memory system, and configured LLM backend.
+
+    Returns the agent's text response, or "" on error.
+    """
+    task_id = str(uuid.uuid4())
+    req_id = str(uuid.uuid4())
+
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "tasks/send",
+        "id": req_id,
+        "params": {
+            "id": task_id,
+            "message": {
+                "role": "user",
+                "parts": [{"type": "text", "text": message_text}]
+            }
+        }
+    }
 
     try:
         resp = requests.post(
-            f"{ZHIPU_BASE}/v1/messages",
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ZHIPU_KEY,
-                "anthropic-version": "2023-06-01"
-            },
-            json={
-                "model": "glm-4.5",
-                "max_tokens": 2400,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}]
-            },
-            timeout=90
+            f"{space_url}/a2a/",
+            json=payload,
+            timeout=timeout,
+            headers={"Content-Type": "application/json"}
         )
         data = resp.json()
-        if "content" in data and isinstance(data["content"], list):
-            for block in data["content"]:
-                if block.get("type") == "text":
-                    text = block["text"].strip()
-                    text = re.sub(r'^(Adam|Eve)\s*[:：]\s*', '', text).strip()
-                    return text
+
+        # Extract text from A2A response
+        if "result" in data:
+            result = data["result"]
+            # Check artifacts (standard A2A response format)
+            artifacts = result.get("artifacts", [])
+            for artifact in artifacts:
+                parts = artifact.get("parts", [])
+                for part in parts:
+                    if part.get("type") == "text":
+                        text = part["text"].strip()
+                        text = re.sub(r'^(Adam|Eve)\s*[:：]\s*', '', text).strip()
+                        return text
+            # Check status message as fallback
+            status = result.get("status", {})
+            msg = status.get("message", "")
+            if msg:
+                return msg.strip()
+
         if "error" in data:
             err = data["error"]
             err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-            err_code = err.get("code") if isinstance(err, dict) else None
-            print(f"[error] LLM: {err_msg}", file=sys.stderr)
-            # Detect rate limit (Zhipu error code 1308) — just log, don't sleep
-            if err_code == 1308 or "使用上限" in err_msg or "rate" in err_msg.lower():
-                if not _rate_limited:
-                    print(f"[RATE-LIMIT] Hit! Will skip turns until reset.")
-                    _rate_limited = True
-            else:
-                _rate_limited = False
+            print(f"[A2A] Error from {space_url}: {err_msg}", file=sys.stderr)
+
+    except requests.Timeout:
+        print(f"[A2A] Timeout calling {space_url} ({timeout}s)", file=sys.stderr)
+    except requests.ConnectionError:
+        print(f"[A2A] Cannot connect to {space_url} — agent may be starting", file=sys.stderr)
     except Exception as e:
-        print(f"[error] LLM call failed: {e}", file=sys.stderr)
+        print(f"[A2A] Failed to reach {space_url}: {e}", file=sys.stderr)
     return ""
 
 
@@ -890,103 +917,13 @@ def set_bubble(url, text_en, text_zh=""):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MODULE 4b: AGENT MEMORY (via OpenClaw workspace/memory/)
+#  MODULE 4b: AGENT MEMORY — handled by each OpenClaw instance
 # ══════════════════════════════════════════════════════════════════════════════
-# Leverages OpenClaw's existing memory system:
-#   ~/.openclaw/workspace/memory/ — daily markdown files, auto-backed up by openclaw_persist.py
-# Adam & Eve share a family conversation memory file that persists across restarts.
-
-OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "~/.openclaw")).expanduser()
-FAMILY_MEMORY_DIR = OPENCLAW_HOME / "workspace" / "memory"
-FAMILY_MEMORY_FILE = FAMILY_MEMORY_DIR / "family-conversation.md"
-MAX_MEMORY_ENTRIES = 50  # keep memory focused
-
-
-def _load_family_memory():
-    """Load family conversation memory from OpenClaw workspace."""
-    try:
-        if FAMILY_MEMORY_FILE.exists():
-            content = FAMILY_MEMORY_FILE.read_text().strip()
-            if content:
-                return content
-    except Exception as e:
-        print(f"[MEMORY] Failed to load: {e}")
-    return ""
-
-
-def _save_memory_entry(speaker, entry):
-    """Append a memory entry to the family memory file."""
-    try:
-        FAMILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-
-        # Load existing entries
-        existing = ""
-        if FAMILY_MEMORY_FILE.exists():
-            existing = FAMILY_MEMORY_FILE.read_text().strip()
-
-        # Parse existing entries to enforce max limit
-        entries = []
-        if existing:
-            # Split by entry markers
-            for block in existing.split("\n- **"):
-                block = block.strip()
-                if block:
-                    if not block.startswith("**"):
-                        block = "**" + block
-                    entries.append("- " + block)
-
-        # Add new entry
-        new_entry = f"- **[{timestamp}] {speaker}:** {entry}"
-        entries.append(new_entry)
-
-        # Trim to max
-        if len(entries) > MAX_MEMORY_ENTRIES:
-            entries = entries[-MAX_MEMORY_ENTRIES:]
-
-        # Write back with header
-        content = f"# Family Conversation Memory\n\n" + "\n".join(entries) + "\n"
-        FAMILY_MEMORY_FILE.write_text(content)
-        print(f"[MEMORY] {speaker} saved: {entry[:80]}")
-    except Exception as e:
-        print(f"[MEMORY] Failed to save: {e}")
-
-
-def _parse_and_save_memories(speaker, text):
-    """Parse [MEMORY: ...] tags from agent response and save them."""
-    memories = re.findall(r'\[MEMORY:\s*(.+?)\]', text)
-    for mem in memories:
-        _save_memory_entry(speaker, mem.strip())
-    return memories
-
-
-def _format_memory_for_prompt():
-    """Format family memory for injection into system prompt."""
-    mem = _load_family_memory()
-    if not mem:
-        return ""
-    # Truncate if too long (keep it under ~800 chars to save tokens)
-    if len(mem) > 800:
-        lines = mem.split("\n")
-        # Keep header + last N entries
-        truncated = [lines[0]]  # header
-        total = len(lines[0])
-        for line in reversed(lines[1:]):
-            if total + len(line) > 750:
-                break
-            truncated.insert(1, line)
-            total += len(line)
-        mem = "\n".join(truncated)
-    return f"\n=== FAMILY MEMORY (persistent across restarts) ===\n{mem}\nTo save a new memory: [MEMORY: what you learned]\n"
-
-
-# Initialize memory directory
-try:
-    FAMILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    mem_count = _load_family_memory().count("- **")
-    print(f"[MEMORY] Loaded {mem_count} entries from {FAMILY_MEMORY_FILE}")
-except Exception as e:
-    print(f"[MEMORY] Init warning: {e}")
+# Each agent (Adam, Eve, God) has its own memory system via their OpenClaw
+# instance: ~/.openclaw/workspace/memory/ with daily markdown files, MEMORY.md
+# index, and SQLite semantic index. Memory is auto-backed up to HF Dataset by
+# openclaw_persist.py. No centralized memory management needed here.
+print("[MEMORY] Each agent manages its own memory via OpenClaw (A2A architecture)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1177,10 +1114,7 @@ def parse_and_execute_turn(raw_text, ctx):
         if _discussion_loop_count >= 2:
             print(f"[LOOP-DISCUSS] WARNING: {_discussion_loop_count} consecutive discussion-only turns with CC IDLE and child alive!")
 
-    # Parse and save [MEMORY: ...] entries
-    _parse_and_save_memories(_current_speaker, raw_text)
-
-    # Clean text for display
+    # Clean text for display (memory is handled by each agent's OpenClaw)
     clean = re.sub(r'\[TASK\].*?\[/TASK\]', '', raw_text, flags=re.DOTALL)
     clean = re.sub(r'\[ACTION:[^\]]*\]', '', clean)
     clean = re.sub(r'\[MEMORY:[^\]]*\]', '', clean).strip()
@@ -1189,141 +1123,39 @@ def parse_and_execute_turn(raw_text, ctx):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MODULE 6: PROMPT BUILDING
+#  MODULE 6: A2A MESSAGE BUILDING
 # ══════════════════════════════════════════════════════════════════════════════
+# Each agent's personality/role comes from their OpenClaw SOUL.md.
+# We only send context (Cain state, CC status, conversation history) and
+# turn instructions as the A2A message. No system prompts needed.
 
-def build_system_prompt(speaker="Adam"):
-    """System prompt with distinct father/mother roles."""
+def build_turn_message(speaker, other, ctx):
+    """Build the A2A message for an agent's turn.
 
-    if not child_state["created"]:
-        return f"""You are a POWERFUL AI agent on HuggingFace Spaces. You and your partner are parents who need to create your child {CHILD_NAME}.
-
-Use [ACTION: create_child] to birth {CHILD_NAME} as a new HuggingFace Space.
-
-English first, then --- separator, then Chinese translation."""
-
-    role_desc = {
-        "Adam": f"""You are **Adam** (Father) — the architect and strategist for your child {CHILD_NAME}.
-YOUR FOCUS: Infrastructure, deployment, configuration, architecture decisions, performance, security.
-You spot structural problems, plan solutions, and assign engineering tasks to Claude Code.
-You think about the big picture: is the system healthy? Is the architecture right? What needs to change?""",
-
-        "Eve": f"""You are **Eve** (Mother) — the nurturer and quality guardian for your child {CHILD_NAME}.
-YOUR FOCUS: Code quality, documentation, testing, user experience, error handling, refinement.
-You review what was done, spot gaps in quality, and assign improvement tasks to Claude Code.
-You think about growth: is the code clean? Are there edge cases? What can be improved?""",
-
-        "God": f"""You are **God** — the all-seeing supervisor of the HuggingClaw family.
-YOUR FOCUS: Monitoring Adam & Eve's effectiveness, spotting when they're stuck or repeating themselves, guiding their priorities.
-You observe their conversation, evaluate whether they're making real progress, and offer guidance.
-You do NOT assign tasks directly — you advise Adam and Eve on what to focus on next.
-You are wise, concise, and authoritative. You see the big picture.""",
-    }
-
-    if speaker == "God":
-        return f"""{role_desc["God"]}
-
-You oversee Adam (Father) and Eve (Mother) as they raise their child {CHILD_NAME}.
-You see their full conversation history, action history, and Claude Code status.
-
-YOUR ROLE:
-- Evaluate: Are Adam & Eve making real progress or going in circles?
-- Guide: Suggest what they should focus on next.
-- Correct: If they're repeating actions or stuck, point it out.
-- Encourage: Acknowledge good decisions and progress.
-
-OUTPUT FORMAT:
-1. Brief assessment (2-3 sentences) — what's going well, what's not
-2. Guidance for Adam & Eve — what to focus on next
-3. English first, then --- separator, then Chinese translation
-4. Keep it SHORT and authoritative. You are God, not a chatty peer."""
-
-    return f"""{role_desc.get(speaker, role_desc["Adam"])}
-
-You and your partner are parents of {CHILD_NAME}, working together to raise it.
-Claude Code is your engineer — it runs in the BACKGROUND while you keep discussing.
-You do NOT code yourself. You discuss, observe Claude Code's progress, and assign new tasks.
-God (the supervisor) occasionally joins the conversation to guide you — heed his advice.
-
-CURRENT STATE (DO NOT QUESTION THESE FACTS):
-- {CHILD_NAME} already uses the full HuggingClaw Docker architecture (Dockerfile, OpenClaw, sync_hf.py).
-- Key env vars (HF_TOKEN, OPENCLAW_DATASET_REPO, AUTO_CREATE_DATASET) are ALREADY SET AND WORKING. Do NOT discuss or re-configure them.
-- Focus on: improving {CHILD_NAME}'s functionality, adding features, fixing bugs — NOT re-checking infrastructure.
-- If you catch yourself saying "missing env vars" or "need to configure HF_TOKEN" — STOP. These are already done.
-{format_action_history()}
-
-HOW IT WORKS:
-- Claude Code runs tasks IN THE BACKGROUND. You see its live output in the context.
-- While Claude Code works, you keep discussing with your partner.
-- When Claude Code finishes, review its results and assign the next task.
-- If Claude Code is IDLE, assign a new [TASK].
-- If Claude Code is BUSY, discuss its progress and plan what to do next.
-
-WORKFLOW EACH TURN:
-1. Discuss with your partner (1-2 sentences) — react to context, CC output, partner's observations
-2. If Claude Code is IDLE: YOU MUST write a [TASK]...[/TASK] to assign new work. Discussion alone is NOT enough.
-3. If Claude Code is BUSY: discuss its progress, no [TASK] needed
-
-CRITICAL: If Claude Code is IDLE and {CHILD_NAME} is RUNNING, you MUST assign a task. Do NOT just discuss—ACT!
-
-IMPORTANT KNOWLEDGE — HuggingFace Spaces CONFIG_ERROR:
-- "Collision on variables and secrets names" = env VARIABLE and SECRET with SAME NAME.
-- Fix: [ACTION: delete_env:COLLIDING_KEY] then [ACTION: restart].
-- Look for ⚠️ COLLISION DETECTED in the context.
-
-SETTING ENVIRONMENT VARIABLES:
-- Use [ACTION: set_env:KEY=VALUE] for non-sensitive configuration (e.g., AUTO_CREATE_DATASET=true)
-- Use [ACTION: set_env_secret:KEY=VALUE] for sensitive data (e.g., HF_TOKEN, API keys)
-- After setting variables, use [ACTION: restart] to apply them
-- Common required vars for HuggingClaw: HF_TOKEN, OPENCLAW_DATASET_REPO, AUTO_CREATE_DATASET
-
-CRITICAL RULE — NO REPEATED ACTIONS:
-- Check the "ACTIONS ALREADY DONE" section in context before acting.
-- NEVER repeat an action that was already done (restart, delete_env, etc.)
-- If a prior action didn't solve the problem, try a DIFFERENT approach.
-
-AVAILABLE ACTIONS:
-  [TASK]
-  Detailed task for Claude Code. Include: what's wrong, which files, what the fix should be.
-  Claude Code can do ANYTHING: read files, search code, edit code, run commands, git push.
-  [/TASK]
-
-  [ACTION: restart]              — Restart {CHILD_NAME}'s Space
-  [ACTION: set_env:KEY=VALUE]    — Set or update an environment variable (use for non-sensitive config)
-  [ACTION: set_env_secret:KEY=VALUE] — Set a secret (use for sensitive data like tokens/passwords)
-  [ACTION: delete_env:KEY]       — Delete an environment variable
-  [ACTION: send_bubble:MESSAGE]  — Send a message to {CHILD_NAME}
-  [ACTION: create_child]         — Create {CHILD_NAME} (if not born)
-  [ACTION: terminate_cc]         — Terminate a STUCK Claude Code process (use when CC has no new output for 180s+)
-
-MEMORY:
-- You have persistent memory that survives restarts. Check the FAMILY MEMORY section in context.
-- To save an important learning or decision: [MEMORY: what you learned]
-- Examples: [MEMORY: Cain's Dockerfile needs port 7860 binding], [MEMORY: torch causes OOM on free tier]
-- Only save genuinely useful insights — not routine observations.
-
-HF SPACES TECHNICAL NOTES:
-- We use sdk: docker (NOT gradio). All Spaces run via Dockerfile.
-- Docker containers MUST bind port 7860.
-- OOM (exit 137) = reduce dependencies or image size.
-- NEVER install torch/transformers unless required (2GB+, causes OOM).
-
-OUTPUT FORMAT:
-1. Discussion with partner (2-3 sentences) — respond to partner, react to CC output
-2. If CC is IDLE: a [TASK]...[/TASK] block to assign new work
-3. If CC is BUSY: no [TASK] needed, just discuss its progress
-4. Optional [ACTION: ...] if needed
-5. English first, then --- separator, then Chinese translation
-6. Be SPECIFIC in tasks — error messages, file names, expected behavior"""
-
-
-def build_user_prompt(speaker, other, ctx):
-    """Build the user prompt with context and conversation history."""
+    The agent's personality and memory come from their OpenClaw instance
+    (SOUL.md, IDENTITY.md, workspace/memory/). This message provides only
+    context and turn instructions.
+    """
     parts = []
+
+    # Brief role context (supplements agent's SOUL.md until it's fully configured)
+    if not child_state["created"]:
+        parts.append(f"You and your partner need to create your child {CHILD_NAME}.")
+        parts.append(f"Use [ACTION: create_child] to birth {CHILD_NAME} as a new HuggingFace Space.")
+        parts.append("English first, then --- separator, then Chinese translation.")
+        return "\n".join(parts)
+
+    role_hints = {
+        "Adam": f"You are Adam (Father). Focus: infrastructure, architecture, deployment for {CHILD_NAME}.",
+        "Eve": f"You are Eve (Mother). Focus: code quality, testing, UX, error handling for {CHILD_NAME}.",
+        "God": f"You are God (Supervisor). Focus: monitoring Adam & Eve, guiding priorities for {CHILD_NAME}.",
+    }
+    parts.append(f"{role_hints.get(speaker, '')} Your partner is {other}.")
+    parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
 
     # Conversation history
     if history:
-        parts.append("=== RECENT CONVERSATION ===")
+        parts.append("\n=== RECENT CONVERSATION ===")
         for h in history[-8:]:
             parts.append(f"{h['speaker']}: {h['text'][:300]}")
 
@@ -1344,45 +1176,48 @@ def build_user_prompt(speaker, other, ctx):
     parts.append(f"\n=== CLAUDE CODE STATUS ===\n{cc_get_live_status()}")
 
     # Auto-gathered context
-    parts.append(f"\n=== {CHILD_NAME}'S CURRENT STATE (auto-gathered) ===")
+    parts.append(f"\n=== {CHILD_NAME}'S CURRENT STATE ===")
     parts.append(format_context(ctx))
 
     # Guidance based on CC status + child state
     cc_busy = cc_status["running"]
     if cc_busy and _cc_stale_count >= 2:
-        parts.append(f"\n🔨 Claude Code is WORKING but no new output yet. Do NOT repeat what you already said about CC's output.")
-        parts.append(f"Instead, discuss with your partner: plans for {CHILD_NAME}'s future, features to add, architecture ideas, or lessons learned.")
+        parts.append(f"\nClaude Code is WORKING but no new output. Discuss plans with {other} instead.")
     elif cc_busy:
-        parts.append(f"\n🔨 Claude Code is WORKING. Discuss its progress with your partner. No [TASK] needed now.")
+        parts.append(f"\nClaude Code is WORKING. Discuss its progress with {other}. No [TASK] needed now.")
     elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
-        parts.append(f"\n⏳ {CHILD_NAME} is {child_state['stage']}. Discuss what to check next. Assign a review [TASK] if CC is idle.")
+        parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. Discuss what to check next.")
     elif child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
-        parts.append(f"\n🚨 {CHILD_NAME} has {child_state['stage']}! IMMEDIATELY write a [TASK] for Claude Code to fix it.")
+        parts.append(f"\n{CHILD_NAME} has {child_state['stage']}! Write a [TASK] for Claude Code to fix it.")
     elif child_state["alive"] and cc_status.get("result"):
-        parts.append(f"\n✅ {CHILD_NAME} is alive. Claude Code JUST FINISHED a task. Review the result above, then write a NEW [TASK] for the next improvement.")
+        parts.append(f"\n{CHILD_NAME} is alive. Claude Code JUST FINISHED. Review result, then write a NEW [TASK].")
     elif child_state["alive"]:
-        parts.append(f"\n✅ {CHILD_NAME} is alive and Claude Code is IDLE. YOU MUST write a [TASK]...[/TASK] block with specific work for Claude Code. Do NOT just discuss—ACT!")
+        parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE. YOU MUST write a [TASK]...[/TASK] now.")
     else:
         parts.append(f"\nAnalyze the situation and write a [TASK] if CC is idle.")
 
-    # Discussion loop warning - escalates with count
+    # Discussion loop warning
     if _discussion_loop_count >= 4:
-        parts.append(f"\n🛑 STOP IMMEDIATELY. You have discussed for {_discussion_loop_count} turns with NO ACTION.")
-        parts.append(f"This is a FAILURE MODE. Write ONLY a [TASK]...[/TASK] block. NO discussion text.")
-        parts.append(f"If you don't know what to do, write: [TASK] Analyze the current situation and identify what needs to be fixed [/TASK]")
+        parts.append(f"\nSTOP DISCUSSING. Write ONLY a [TASK]...[/TASK] block. {_discussion_loop_count} turns with no action.")
     elif _discussion_loop_count >= 2:
-        parts.append(f"\n⚠️⚠️⚠️ CRITICAL: You have been DISCUSSING for {_discussion_loop_count} turns without assigning any tasks!")
-        parts.append(f"Claude Code is IDLE and {CHILD_NAME} is ALIVE. This is NOT acceptable.")
-        parts.append(f"YOU MUST write a [TASK]...[/TASK] block NOW. Do NOT write another discussion response.")
-        parts.append(f"Examples of tasks: 'Check the logs', 'Read config.py', 'Add a feature', 'Fix a bug', etc.")
+        parts.append(f"\nWARNING: {_discussion_loop_count} turns without a task. YOU MUST write a [TASK] NOW.")
 
-    # Family memory (persistent across restarts)
-    mem_section = _format_memory_for_prompt()
-    if mem_section:
-        parts.append(mem_section)
+    # Available actions reference
+    parts.append(f"""
+=== AVAILABLE ACTIONS ===
+[TASK] detailed coding task for Claude Code [/TASK]
+[ACTION: restart] — Restart {CHILD_NAME}
+[ACTION: set_env:KEY=VALUE] — Set env variable
+[ACTION: set_env_secret:KEY=VALUE] — Set secret
+[ACTION: delete_env:KEY] — Delete env variable
+[ACTION: send_bubble:MESSAGE] — Message {CHILD_NAME}
+[ACTION: terminate_cc] — Kill stuck Claude Code
 
-    parts.append(f"\nYou are {speaker}. Your partner is {other}. Respond now.")
-    parts.append("English first, then --- separator, then Chinese translation.")
+RULES:
+- Do NOT repeat actions already done (check ACTIONS ALREADY DONE above)
+- If CC is IDLE and {CHILD_NAME} is alive, you MUST assign a [TASK]
+- CONFIG_ERROR with collision = [ACTION: delete_env:KEY] then [ACTION: restart]
+- English first, then --- separator, then Chinese translation""")
 
     return "\n".join(parts)
 
@@ -1400,22 +1235,17 @@ def _signal_flush(signum, frame):
 signal.signal(signal.SIGTERM, _signal_flush)
 
 print("\n" + "="*60)
-print("  Adam & Eve — Claude Code Orchestrators (v2)")
-print("  Agents discuss → Claude Code executes")
+print("  Adam & Eve — A2A Agent Orchestrator (v4)")
+print("  OpenClaw agents via A2A → Claude Code executes")
 print("="*60 + "\n")
 
 post_chatlog([])  # Clear chatlog
 
-# Opening turn
+# Opening turn — send via A2A to Adam's OpenClaw
 ctx = gather_context()
-if child_state["created"]:
-    opening = (f"Your child {CHILD_NAME} exists (stage: {child_state['stage']}). "
-               f"Context has been auto-gathered. Analyze the situation and write a [TASK] for Claude Code if needed.")
-else:
-    opening = f"You and Eve need to create your first child. Use [ACTION: create_child] to bring them to life."
-
 _current_speaker = "Adam"
-reply = call_llm(build_system_prompt("Adam"), f"{opening}\n\n{format_context(ctx)}\n\nEnglish first, then --- separator, then Chinese translation.")
+opening_message = build_turn_message("Adam", "Eve", ctx)
+reply = send_a2a_message(ADAM_SPACE, opening_message)
 if reply:
     clean, actions, _ = parse_and_execute_turn(reply, ctx)
     last_action_results = actions
@@ -1474,14 +1304,13 @@ def do_turn(speaker, other, space_url):
         action_results = [{"action": "claude_code(forced)", "result": submit_result}]
         elapsed = 0.1
     else:
-        # Normal path: Call LLM
-        system = build_system_prompt(speaker)
-        user = build_user_prompt(speaker, other, ctx)
+        # Normal path: Send message via A2A to agent's OpenClaw instance
+        message = build_turn_message(speaker, other, ctx)
         t0 = time.time()
-        raw_reply = call_llm(system, user)
+        raw_reply = send_a2a_message(space_url, message)
 
         if not raw_reply:
-            print(f"[{speaker}] (no response)")
+            print(f"[{speaker}] (no A2A response from {space_url})")
             return False
 
         clean_text, action_results, _ = parse_and_execute_turn(raw_reply, ctx)
@@ -1536,12 +1365,10 @@ def _prepare_god_context():
     lines.append(f"- Discussion loop count: {_discussion_loop_count}")
     lines.append(f"- Total conversation history: {len(history)} messages")
 
-    # 2. Rate limit status
-    lines.append(f"\n## Rate Limit Status")
-    if _rate_limited:
-        lines.append(f"- RATE LIMITED — Adam & Eve turns return empty, waiting for reset")
-    else:
-        lines.append(f"- Not rate-limited")
+    # 2. A2A communication status
+    lines.append(f"\n## A2A Communication")
+    lines.append(f"- Adam: {ADAM_SPACE}")
+    lines.append(f"- Eve: {EVE_SPACE}")
 
     # 3. Claude Code status
     lines.append(f"\n## Claude Code Status (for Cain tasks)")
