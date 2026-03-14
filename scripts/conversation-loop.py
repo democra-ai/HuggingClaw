@@ -1102,11 +1102,10 @@ AVAILABLE ACTIONS:
   [ACTION: terminate_cc]         — Terminate a STUCK Claude Code process (use when CC has no new output for 180s+)
 
 HF SPACES TECHNICAL NOTES:
+- We use sdk: docker (NOT gradio). All Spaces run via Dockerfile.
 - Docker containers MUST bind port 7860.
-- gradio MUST be in requirements.txt. NEVER remove it.
-- OOM (exit 137) = reduce dependencies, NOT remove gradio.
+- OOM (exit 137) = reduce dependencies or image size.
 - NEVER install torch/transformers unless required (2GB+, causes OOM).
-- If sdk: gradio in README.md, Dockerfile is IGNORED. Use sdk: docker.
 
 OUTPUT FORMAT:
 1. Discussion with partner (2-3 sentences) — respond to partner, react to CC output
