@@ -383,6 +383,124 @@ CLAUDE_WORK_DIR = "/tmp/claude-workspace"
 CLAUDE_TIMEOUT = 300  # 5 minutes
 TURN_INTERVAL = 15    # seconds between turns — fast enough for lively discussion
 
+
+def _write_claude_md(workspace, role="worker"):
+    """Write CLAUDE.md to workspace so Claude Code loads persistent project knowledge.
+
+    This replaces stuffing static context into every prompt, saving tokens.
+    Claude Code reads CLAUDE.md automatically and builds its own memory in .claude/.
+    """
+    if role == "worker":
+        content = f"""# HuggingClaw — {CHILD_NAME}'s Space
+
+## Architecture
+- {CHILD_NAME} is a child agent in the HuggingClaw World family system
+- Runs as an OpenClaw instance on HuggingFace Spaces (sdk: docker, NOT gradio)
+- Space ID: {CHILD_SPACE_ID}
+- Dataset ID: {CHILD_DATASET_ID}
+
+## Already Configured (DO NOT reconfigure these)
+- HF_TOKEN — set as secret, working
+- OPENCLAW_DATASET_REPO — set, pointing to {CHILD_NAME}'s dataset
+- AUTO_CREATE_DATASET — set to true
+- Docker port 7860
+- sync_hf.py and entrypoint.sh are in place
+
+## Technical Rules
+- All Spaces use sdk: docker with Dockerfile-based deployment
+- Docker containers MUST bind port 7860
+- OOM (exit 137) = reduce dependencies or image size
+- NEVER install torch/transformers unless absolutely required (2GB+, causes OOM)
+- You have FULL permission to read/write/create/delete files. Just do it.
+
+## Focus
+Improve {CHILD_NAME}'s functionality, add features, fix bugs.
+Do NOT re-check or re-configure infrastructure that is already working.
+"""
+    elif role == "god":
+        content = f"""# HuggingClaw — System Supervisor (God)
+
+## Your Role
+You are God — the autonomous supervisor of the HuggingClaw family system.
+You have the same capabilities as a human operator running Claude Code locally.
+Your job: monitor Adam & Eve's conversation loop and fix mechanism issues.
+
+## Architecture
+- Home Space runs conversation-loop.py which orchestrates the family
+- Adam & Eve converse via Zhipu GLM-4.5, assign [TASK] blocks to Claude Code CLI
+- Claude Code worker clones Cain's repo, makes changes, and pushes
+- You (God) monitor the conversation and fix the orchestration mechanism
+- All Spaces use sdk: docker (NOT gradio)
+
+## Rules
+- ONLY modify scripts/conversation-loop.py — do NOT touch Cain's Space
+- Only push fixes for real problems, not cosmetic or trivial changes
+- Pushing triggers a Space restart — be confident the fix is correct
+- If everything looks healthy, exit quickly without changes
+
+## Common Issues to Watch For
+- Agents repeating discussion about env vars that are already configured
+- Discussion loops with no [TASK] assignment when CC is idle
+- Rate limit handling issues
+- System prompt not specific enough
+- Action history not persisting across restarts
+
+## Commit Convention
+Always use: git commit -m "god: <brief description>"
+"""
+    try:
+        with open(f"{workspace}/CLAUDE.md", "w") as f:
+            f.write(content)
+    except Exception as e:
+        print(f"[CLAUDE.md] Failed to write: {e}")
+
+
+def _reset_workspace(workspace, repo_url):
+    """Reset workspace to latest origin/main, preserving .claude/ memory directory."""
+    try:
+        if os.path.exists(f"{workspace}/.git"):
+            try:
+                subprocess.run(
+                    "git fetch origin && git reset --hard origin/main",
+                    shell=True, cwd=workspace, timeout=30,
+                    capture_output=True, check=True
+                )
+            except Exception:
+                # Preserve .claude/ memory if it exists
+                claude_dir = f"{workspace}/.claude"
+                has_memory = os.path.exists(claude_dir)
+                if has_memory:
+                    subprocess.run(f"mv {claude_dir} /tmp/_claude_memory_bak", shell=True, capture_output=True)
+                subprocess.run(f"rm -rf {workspace}", shell=True, capture_output=True)
+                subprocess.run(
+                    f"git clone --depth 20 {repo_url} {workspace}",
+                    shell=True, timeout=60, capture_output=True, check=True
+                )
+                if has_memory:
+                    subprocess.run(f"mv /tmp/_claude_memory_bak {claude_dir}", shell=True, capture_output=True)
+        else:
+            # Preserve .claude/ memory if workspace exists but is broken
+            claude_dir = f"{workspace}/.claude"
+            has_memory = os.path.exists(claude_dir)
+            if has_memory:
+                subprocess.run(f"mv {claude_dir} /tmp/_claude_memory_bak", shell=True, capture_output=True)
+            if os.path.exists(workspace):
+                subprocess.run(f"rm -rf {workspace}", shell=True, capture_output=True)
+            subprocess.run(
+                f"git clone --depth 20 {repo_url} {workspace}",
+                shell=True, timeout=60, capture_output=True, check=True
+            )
+            if has_memory:
+                subprocess.run(f"mv /tmp/_claude_memory_bak {claude_dir}", shell=True, capture_output=True)
+        subprocess.run(f'git config user.name "Claude Code"',
+                       shell=True, cwd=workspace, capture_output=True)
+        subprocess.run(f'git config user.email "claude-code@huggingclaw"',
+                       shell=True, cwd=workspace, capture_output=True)
+        return True
+    except Exception as e:
+        print(f"[WORKSPACE] Failed to prepare {workspace}: {e}")
+        return False
+
 def action_claude_code(task):
     """Run Claude Code CLI to autonomously complete a coding task on Cain's Space."""
     if not child_state["created"]:
@@ -391,34 +509,10 @@ def action_claude_code(task):
     global _pending_cooldown
     repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{CHILD_SPACE_ID}"
 
-    # 1. Clone / reset to latest
-    try:
-        if os.path.exists(f"{CLAUDE_WORK_DIR}/.git"):
-            try:
-                subprocess.run(
-                    "git fetch origin && git reset --hard origin/main",
-                    shell=True, cwd=CLAUDE_WORK_DIR, timeout=30,
-                    capture_output=True, check=True
-                )
-            except Exception:
-                subprocess.run(f"rm -rf {CLAUDE_WORK_DIR}", shell=True, capture_output=True)
-                subprocess.run(
-                    f"git clone --depth 20 {repo_url} {CLAUDE_WORK_DIR}",
-                    shell=True, timeout=60, capture_output=True, check=True
-                )
-        else:
-            if os.path.exists(CLAUDE_WORK_DIR):
-                subprocess.run(f"rm -rf {CLAUDE_WORK_DIR}", shell=True, capture_output=True)
-            subprocess.run(
-                f"git clone --depth 20 {repo_url} {CLAUDE_WORK_DIR}",
-                shell=True, timeout=60, capture_output=True, check=True
-            )
-        subprocess.run('git config user.name "Claude Code"',
-                       shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True)
-        subprocess.run('git config user.email "claude-code@huggingclaw"',
-                       shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True)
-    except Exception as e:
-        return f"Failed to prepare workspace: {e}"
+    # 1. Clone / reset to latest (preserving .claude/ memory)
+    if not _reset_workspace(CLAUDE_WORK_DIR, repo_url):
+        return "Failed to prepare workspace."
+    _write_claude_md(CLAUDE_WORK_DIR, role="worker")
 
     # 2. Run Claude Code with z.ai backend (Zhipu GLM)
     env = os.environ.copy()
@@ -621,15 +715,11 @@ def format_context(ctx):
 
 
 def enrich_task_with_context(task_desc, ctx):
-    """Append auto-gathered context to task description for Claude Code."""
+    """Append dynamic state to task. Static knowledge is in CLAUDE.md."""
     parts = [task_desc]
-    parts.append(f"\n\nIMPORTANT: You have FULL permission to read and write files. Do NOT ask for permission. Just make the changes directly. Edit files, create files, delete files — whatever is needed. Do NOT output code suggestions — actually write them to the files.")
-    parts.append(f"\n--- AUTO-GATHERED CONTEXT ---")
-    parts.append(f"Space ID: {CHILD_SPACE_ID}")
-    parts.append(f"Dataset ID: {CHILD_DATASET_ID}")
-    parts.append(f"Current stage: {child_state['stage']}")
+    # Only dynamic state — static knowledge (architecture, rules, env vars) is in CLAUDE.md
+    parts.append(f"\nCurrent stage: {child_state['stage']}")
     parts.append(f"Health: {ctx.get('health', 'unknown')}")
-    parts.append(f"Environment: {ctx.get('env', 'unknown')}")
     return "\n".join(parts)
 
 
@@ -842,8 +932,7 @@ def _restore_action_history():
         try:
             with open(ACTION_HISTORY_LOCAL) as f:
                 action_history = json.load(f)
-            print(f"[ACTION_HISTORY] Cleared {len(action_history)} stale entries from previous run (fresh session)")
-            action_history = []  # Clear on restart to match reset turn_count
+            print(f"[ACTION_HISTORY] Restored {len(action_history)} entries from local file")
             return
         except Exception as e:
             print(f"[ACTION_HISTORY] Local restore failed: {e}")
@@ -853,11 +942,9 @@ def _restore_action_history():
                              repo_type="dataset", token=HF_TOKEN)
         with open(dl) as f:
             action_history = json.load(f)
-        print(f"[ACTION_HISTORY] Cleared {len(action_history)} stale entries from previous run (fresh session)")
-        action_history = []  # Clear on restart to match reset turn_count
+        print(f"[ACTION_HISTORY] Restored {len(action_history)} entries from HF Dataset")
     except Exception as e:
         print(f"[ACTION_HISTORY] No prior history found ({e}), starting fresh")
-        action_history = []
 
 # Restore on startup
 _restore_action_history()
@@ -1373,29 +1460,11 @@ def do_god_turn():
     """
     global last_action_results
 
-    # 1. Clone/update Home Space repo
+    # 1. Clone/update Home Space repo (preserving .claude/ memory)
     repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{HOME_SPACE_ID}"
-    try:
-        if os.path.exists(f"{GOD_WORK_DIR}/.git"):
-            subprocess.run(
-                "git fetch origin && git reset --hard origin/main",
-                shell=True, cwd=GOD_WORK_DIR, timeout=30,
-                capture_output=True, check=True
-            )
-        else:
-            if os.path.exists(GOD_WORK_DIR):
-                subprocess.run(f"rm -rf {GOD_WORK_DIR}", shell=True, capture_output=True)
-            subprocess.run(
-                f"git clone --depth 20 {repo_url} {GOD_WORK_DIR}",
-                shell=True, timeout=60, capture_output=True, check=True
-            )
-        subprocess.run('git config user.name "God (Claude Code)"',
-                       shell=True, cwd=GOD_WORK_DIR, capture_output=True)
-        subprocess.run('git config user.email "god@huggingclaw"',
-                       shell=True, cwd=GOD_WORK_DIR, capture_output=True)
-    except Exception as e:
-        print(f"[God] Failed to prepare workspace: {e}")
+    if not _reset_workspace(GOD_WORK_DIR, repo_url):
         return
+    _write_claude_md(GOD_WORK_DIR, role="god")
 
     # Record HEAD before Claude Code runs (to detect if God pushed changes)
     try:
@@ -1414,39 +1483,15 @@ def do_god_turn():
     except Exception as e:
         print(f"[God] Warning: Could not write context file: {e}")
 
-    # 3. Build God's prompt
-    prompt = f"""You are God — the autonomous supervisor of the HuggingClaw family system.
-You have the SAME capabilities as a human operator running Claude Code locally.
-
-## Current System State
+    # 3. Build God's prompt — only dynamic state; static knowledge is in CLAUDE.md
+    prompt = f"""## Current System State
 {context}
 
-## Your Mission
-1. ANALYZE: Read the conversation above. Are Adam & Eve making real progress or stuck in loops?
-   Signs of trouble: repeating the same discussion topics, discussing env vars that are already set,
-   failing to assign [TASK] blocks when CC is idle, rate limit spinning.
-2. DIAGNOSE: If you find problems, read scripts/conversation-loop.py to understand the mechanism
-   and identify the root cause. Focus on system prompts, loop detection, action history.
-3. FIX: Edit scripts/conversation-loop.py to fix the issue. Common fixes:
-   - Strengthen system prompts to prevent repetitive discussions
-   - Pre-seed action history so agents know what is already done
-   - Improve rate limit handling
-   - Add better loop detection or guardrails
-4. DEPLOY: If you made changes, commit and push:
-   git add scripts/conversation-loop.py
-   git commit -m "god: <brief description>"
-   git push
-   WARNING: Pushing restarts the Space. Only push if the fix is correct and necessary.
-5. REPORT: Print a brief summary (2-5 sentences) of your findings and any changes made.
-
-## Rules
-- Do NOT modify Cain's Space or code — only improve conversation-loop.py (the mechanism).
-- Do NOT push trivial or cosmetic changes — only fix real problems.
-- If everything looks healthy, just report "all clear" and exit quickly.
-- Be conservative — a bad change restarts the process and could make things worse.
-- The Home Space repo is at the current working directory.
-- The key file is scripts/conversation-loop.py
-- Full monitoring context is also in GOD_CONTEXT.md"""
+## Tasks
+1. Analyze the conversation. Progress or stuck?
+2. If stuck, diagnose root cause in scripts/conversation-loop.py
+3. Fix and push if needed (commit with "god: <description>")
+4. End with: [REPORT] <what you found and did> — this line is shown to Adam & Eve"""
 
     # 4. Set up env for Claude Code — prefer real Anthropic API, fall back to z.ai
     env = os.environ.copy()
@@ -1471,10 +1516,33 @@ You have the SAME capabilities as a human operator running Claude Code locally.
         print("[God] Using z.ai/Zhipu backend (set ANTHROPIC_API_KEY for real Claude)")
     env["CI"] = "true"
 
-    # 5. Announce analysis start to chatlog
+    # 5. Announce analysis start — describe current observations dynamically
+    observations = []
+    if _rate_limited:
+        observations.append("Zhipu API is rate-limited, Adam & Eve turns are returning empty")
+    if _discussion_loop_count >= 3:
+        observations.append(f"discussion loop detected ({_discussion_loop_count} consecutive turns without task assignment)")
+    elif _discussion_loop_count >= 1:
+        observations.append(f"{_discussion_loop_count} turn(s) without task assignment")
+    if cc_status.get("running"):
+        observations.append(f"Claude Code is working on: {cc_status.get('task', '?')[:80]}")
+    elif cc_status.get("result"):
+        observations.append("Claude Code just finished a task, pending review")
+    if child_state["stage"] not in ("RUNNING",):
+        observations.append(f"{CHILD_NAME} is in stage: {child_state['stage']}")
+    if not history:
+        observations.append("no conversation history yet (fresh start)")
+    elif len(history) <= 4:
+        observations.append(f"only {len(history)} messages so far (early stage)")
+
+    if observations:
+        obs_str = "; ".join(observations)
+        start_en = f"Starting system review. Current observations: {obs_str}."
+        start_zh = f"开始系统审查。当前观察：{obs_str}。"
+    else:
+        start_en = "Starting routine system review."
+        start_zh = "开始例行系统审查。"
     ts_start = datetime.datetime.utcnow().strftime("%H:%M")
-    start_en = "I'm reviewing the system — checking conversation patterns and mechanism health."
-    start_zh = "我正在审查系统——检查对话模式和机制健康状况。"
     entry_start = {"speaker": "God", "time": ts_start, "text": start_en, "text_zh": start_zh}
     history.append(entry_start)
     set_bubble(HOME, start_en, start_zh)
@@ -1518,7 +1586,16 @@ You have the SAME capabilities as a human operator running Claude Code locally.
     elapsed = time.time() - t0
     print(f"[God] Analysis complete ({elapsed:.1f}s, {len(output)} chars)")
 
-    # 7. Announce result to chatlog
+    # 7. Parse [REPORT] from God's output and post to chatlog
+    report_match = re.search(r'\[REPORT\]\s*(.+)', output)
+    if report_match:
+        report = report_match.group(1).strip()
+    else:
+        # Fallback: use last non-empty line of output
+        non_empty = [l for l in output_lines if l.strip()] if output_lines else []
+        report = non_empty[-1] if non_empty else "Analysis complete."
+
+    # Check if God pushed changes
     try:
         head_after = subprocess.run(
             "git log --oneline -1", shell=True, cwd=GOD_WORK_DIR,
@@ -1528,20 +1605,16 @@ You have the SAME capabilities as a human operator running Claude Code locally.
     except Exception:
         god_pushed = False
 
-    ts_end = datetime.datetime.utcnow().strftime("%H:%M")
     if god_pushed:
-        commit_msg = head_after.split(" ", 1)[1] if " " in head_after else head_after
-        en = f"Review complete. I found an issue and deployed a fix: {commit_msg}. The system will restart shortly."
-        zh = f"审查完成。我发现了一个问题并部署了修复：{commit_msg}。系统将很快重启。"
-    else:
-        en = "Review complete. Everything looks healthy, no changes needed."
-        zh = "审查完成。一切正常，无需修改。"
-    entry_end = {"speaker": "God", "time": ts_end, "text": en, "text_zh": zh}
+        report += " System will restart shortly to apply changes."
+
+    ts_end = datetime.datetime.utcnow().strftime("%H:%M")
+    entry_end = {"speaker": "God", "time": ts_end, "text": report, "text_zh": report}
     history.append(entry_end)
-    set_bubble(HOME, en, zh)
+    set_bubble(HOME, report[:200], report[:200])
     post_chatlog(history)
-    persist_turn("God", turn_count, en, zh, [], workflow_state, child_state["stage"])
-    print(f"[God] Result: {'pushed fix' if god_pushed else 'all clear'}")
+    persist_turn("God", turn_count, report, report, [], workflow_state, child_state["stage"])
+    print(f"[God] Report: {report}")
 
 
 _last_god_time = 0.0  # timestamp of last God run
