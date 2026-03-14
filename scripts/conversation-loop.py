@@ -875,12 +875,17 @@ def record_actions(speaker, turn_num, action_results):
 
 
 def format_action_history():
-    """Format action history for injection into context."""
+    """Format action history for injection into context. Filters out stale entries from previous sessions."""
     if not action_history:
         return ""
     lines = ["=== ACTIONS ALREADY DONE (do NOT repeat these) ==="]
+    # Only show entries from current session (turn <= current turn count).
+    # This hides stale entries from previous runs after process restart.
     for ah in action_history:
-        lines.append(f"  Turn #{ah['turn']} {ah['speaker']}: {ah['action']} → {ah['result'][:120]}")
+        if ah['turn'] <= turn_count:
+            lines.append(f"  Turn #{ah['turn']} {ah['speaker']}: {ah['action']} → {ah['result'][:120]}")
+    if len(lines) == 1:  # Only header, no valid entries
+        return ""
     return "\n".join(lines)
 
 # Simple workflow state: BIRTH / WAITING / ACTIVE
