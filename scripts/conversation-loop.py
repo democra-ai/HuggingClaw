@@ -474,10 +474,14 @@ def cc_submit_task(task, assigned_by, ctx):
     print(f"[TASK] {assigned_by} assigned to Claude Code ({len(enriched)} chars)...")
 
     def worker():
+        global _cc_stale_count, _last_cc_snapshot
         result = action_claude_code(enriched)
         with cc_lock:
             cc_status["running"] = False
             cc_status["result"] = result
+            # Reset stale tracking when CC finishes - critical for adaptive pacing
+            _cc_stale_count = 0
+            _last_cc_snapshot = ""
         print(f"[CC-DONE] Task from {assigned_by} finished ({len(result)} chars)")
 
     t = threading.Thread(target=worker, daemon=True)
