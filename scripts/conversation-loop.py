@@ -6,7 +6,7 @@ Architecture: Adam/Eve (Zhipu GLM) gather context and craft task prompts,
 then delegate ALL coding work to Claude Code CLI.
 
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║                    SYSTEM ARCHITECTURE (v2)                        ║
+# ║                    SYSTEM ARCHITECTURE (v3)                        ║
 # ╠══════════════════════════════════════════════════════════════════════╣
 # ║                                                                    ║
 # ║  ┌─────────────┐    discuss     ┌────────────────┐                ║
@@ -18,17 +18,26 @@ then delegate ALL coding work to Claude Code CLI.
 # ║                                         ▼                         ║
 # ║                                 ┌────────────────┐                ║
 # ║  ┌─────────────┐               │ Claude Code    │                ║
-# ║  │ HuggingFace │ ◄──git push── │ CLI            │                ║
+# ║  │ HuggingFace │ ◄──git push── │ CLI (worker)   │                ║
 # ║  │ Cain Space  │               │ (z.ai backend) │                ║
 # ║  └─────────────┘               └────────────────┘                ║
 # ║                                                                    ║
-# ║  Parallel flow:                                                     ║
+# ║  ┌─────────────┐               ┌────────────────┐                ║
+# ║  │ HuggingFace │ ◄──git push── │ God            │                ║
+# ║  │ Home Space  │    (self-fix) │ (Claude Code)  │                ║
+# ║  └─────────────┘               │ monitors loop, │                ║
+# ║                                 │ fixes mechanism│                ║
+# ║                                 └────────────────┘                ║
+# ║  Parallel flow:                                                    ║
 # ║  DISCUSSION THREAD (every 15s):                                    ║
 # ║    Adam → Eve → Adam → Eve → ... (continuous)                     ║
 # ║    Each turn sees CC's live output + Cain's state                  ║
 # ║  CC WORKER THREAD (background):                                    ║
 # ║    Receives [TASK] → clone → analyze → fix → push                 ║
 # ║    Streams output to shared buffer for agents to discuss           ║
+# ║  GOD SUPERVISOR (every 3 cycles):                                  ║
+# ║    Claude Code CLI → reads chatlog → diagnoses issues →            ║
+# ║    fixes conversation-loop.py → pushes → Space restarts            ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 """
 import json, time, re, requests, sys, os, io, subprocess, threading, datetime
@@ -44,6 +53,9 @@ ADAM_SPACE = "https://tao-shen-huggingclaw-adam.hf.space"
 EVE_SPACE  = "https://tao-shen-huggingclaw-eve.hf.space"
 GOD_SPACE  = "https://tao-shen-huggingclaw-god.hf.space"
 GOD_TURN_INTERVAL = 3  # God speaks every N Adam/Eve turn pairs
+GOD_WORK_DIR = "/tmp/god-workspace"
+GOD_TIMEOUT = 600  # 10 minutes for God's Claude Code analysis
+HOME_SPACE_ID = "tao-shen/HuggingClaw-Home"
 
 # ── Child config ───────────────────────────────────────────────────────────────
 CHILD_NAME = "Cain"
@@ -1324,36 +1336,199 @@ def do_turn(speaker, other, space_url):
     return True
 
 
+def _prepare_god_context():
+    """Build comprehensive monitoring context for God's Claude Code analysis."""
+    lines = []
+
+    # 1. Process overview
+    lines.append("## Process Overview")
+    lines.append(f"- Turn count: {turn_count}")
+    lines.append(f"- Workflow state: {workflow_state}")
+    lines.append(f"- Child ({CHILD_NAME}) stage: {child_state['stage']}, alive: {child_state['alive']}")
+    lines.append(f"- Discussion loop count: {_discussion_loop_count}")
+    lines.append(f"- Total conversation history: {len(history)} messages")
+
+    # 2. Rate limit status
+    lines.append(f"\n## Rate Limit Status")
+    if _rate_limit_until > time.time():
+        reset_str = datetime.datetime.utcfromtimestamp(_rate_limit_until).strftime('%Y-%m-%d %H:%M:%S UTC')
+        wait = int(_rate_limit_until - time.time())
+        lines.append(f"- RATE LIMITED until {reset_str} ({wait}s remaining)")
+        lines.append(f"- Adam & Eve cannot converse until rate limit resets")
+    else:
+        lines.append(f"- Not rate-limited")
+
+    # 3. Claude Code status
+    lines.append(f"\n## Claude Code Status (for Cain tasks)")
+    lines.append(cc_get_live_status())
+
+    # 4. Recent conversation (last 20 messages)
+    lines.append(f"\n## Recent Conversation (last 20 of {len(history)} messages)")
+    for entry in history[-20:]:
+        speaker = entry.get("speaker", "?")
+        text = entry.get("text", "")[:300]
+        time_str = entry.get("time", "?")
+        lines.append(f"[{time_str}] {speaker}: {text}")
+    if not history:
+        lines.append("(no conversation yet)")
+
+    # 5. Action history
+    lines.append(f"\n## Action History ({len(action_history)} entries)")
+    ah = format_action_history()
+    lines.append(ah if ah else "(empty — no actions recorded yet)")
+
+    return "\n".join(lines)
+
+
 def do_god_turn():
-    """God speaks — monitoring and guiding Adam & Eve. No actions, just advice."""
+    """God acts — uses Claude Code CLI to monitor, analyze, and fix conversation-loop.py.
+
+    God has the same capabilities as a human operator running Claude Code locally:
+    - Read/modify any file in the Home Space repo
+    - Analyze conversation patterns and detect issues
+    - Fix conversation-loop.py and push changes to deploy
+    - Autonomously improve the system
+    """
     global last_action_results
-    ctx = gather_context()
-    system = build_system_prompt("God")
-    user = build_user_prompt("God", "Adam & Eve", ctx)
-    t0 = time.time()
-    raw_reply = call_llm(system, user)
-    if not raw_reply:
-        print("[God] (no response)")
+
+    # 1. Clone/update Home Space repo
+    repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{HOME_SPACE_ID}"
+    try:
+        if os.path.exists(f"{GOD_WORK_DIR}/.git"):
+            subprocess.run(
+                "git fetch origin && git reset --hard origin/main",
+                shell=True, cwd=GOD_WORK_DIR, timeout=30,
+                capture_output=True, check=True
+            )
+        else:
+            if os.path.exists(GOD_WORK_DIR):
+                subprocess.run(f"rm -rf {GOD_WORK_DIR}", shell=True, capture_output=True)
+            subprocess.run(
+                f"git clone --depth 20 {repo_url} {GOD_WORK_DIR}",
+                shell=True, timeout=60, capture_output=True, check=True
+            )
+        subprocess.run('git config user.name "God (Claude Code)"',
+                       shell=True, cwd=GOD_WORK_DIR, capture_output=True)
+        subprocess.run('git config user.email "god@huggingclaw"',
+                       shell=True, cwd=GOD_WORK_DIR, capture_output=True)
+    except Exception as e:
+        print(f"[God] Failed to prepare workspace: {e}")
         return
+
+    # 2. Build context and write to workspace for reference
+    context = _prepare_god_context()
+    try:
+        with open(f"{GOD_WORK_DIR}/GOD_CONTEXT.md", "w") as f:
+            f.write(context)
+    except Exception as e:
+        print(f"[God] Warning: Could not write context file: {e}")
+
+    # 3. Build God's prompt
+    prompt = f"""You are God — the autonomous supervisor of the HuggingClaw family system.
+You have the SAME capabilities as a human operator running Claude Code locally.
+
+## Current System State
+{context}
+
+## Your Mission
+1. ANALYZE: Read the conversation above. Are Adam & Eve making real progress or stuck in loops?
+   Signs of trouble: repeating the same discussion topics, discussing env vars that are already set,
+   failing to assign [TASK] blocks when CC is idle, rate limit spinning.
+2. DIAGNOSE: If you find problems, read scripts/conversation-loop.py to understand the mechanism
+   and identify the root cause. Focus on system prompts, loop detection, action history.
+3. FIX: Edit scripts/conversation-loop.py to fix the issue. Common fixes:
+   - Strengthen system prompts to prevent repetitive discussions
+   - Pre-seed action history so agents know what is already done
+   - Improve rate limit handling
+   - Add better loop detection or guardrails
+4. DEPLOY: If you made changes, commit and push:
+   git add scripts/conversation-loop.py
+   git commit -m "god: <brief description>"
+   git push
+   WARNING: Pushing restarts the Space. Only push if the fix is correct and necessary.
+5. REPORT: Print a brief summary (2-5 sentences) of your findings and any changes made.
+
+## Rules
+- Do NOT modify Cain's Space or code — only improve conversation-loop.py (the mechanism).
+- Do NOT push trivial or cosmetic changes — only fix real problems.
+- If everything looks healthy, just report "all clear" and exit quickly.
+- Be conservative — a bad change restarts the process and could make things worse.
+- The Home Space repo is at the current working directory.
+- The key file is scripts/conversation-loop.py
+- Full monitoring context is also in GOD_CONTEXT.md"""
+
+    # 4. Set up env for Claude Code — prefer real Anthropic API, fall back to z.ai
+    env = os.environ.copy()
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        # Use real Anthropic API (same as the human operator's Claude Code)
+        env["ANTHROPIC_API_KEY"] = anthropic_key
+        for k in ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+                   "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                   "ANTHROPIC_DEFAULT_HAIKU_MODEL"]:
+            env.pop(k, None)
+        print("[God] Using Anthropic API (real Claude)")
+    else:
+        # Fall back to z.ai/Zhipu backend
+        env.update({
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": ZHIPU_KEY,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "GLM-4.7",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-4.7",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-4.5-Air",
+        })
+        print("[God] Using z.ai/Zhipu backend (set ANTHROPIC_API_KEY for real Claude)")
+    env["CI"] = "true"
+
+    # 5. Run Claude Code CLI
+    print(f"[God] Starting Claude Code analysis...")
+    t0 = time.time()
+    try:
+        proc = subprocess.Popen(
+            ["claude", "-p", prompt, "--output-format", "text", "--dangerously-skip-permissions"],
+            cwd=GOD_WORK_DIR,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        output_lines = []
+        deadline = time.time() + GOD_TIMEOUT
+        for line in proc.stdout:
+            line = line.rstrip('\n')
+            print(f"  [God/CC] {line}")
+            output_lines.append(line)
+            if time.time() > deadline:
+                proc.kill()
+                output_lines.append("(killed: timeout)")
+                break
+        proc.wait(timeout=10)
+        output = '\n'.join(output_lines)
+        if not output.strip():
+            output = "(no output)"
+    except FileNotFoundError:
+        output = "Claude Code CLI not found. Is @anthropic-ai/claude-code installed?"
+        print(f"[God] ERROR: Claude Code CLI not found")
+    except Exception as e:
+        output = f"God's Claude Code failed: {e}"
+        print(f"[God] ERROR: {e}")
+
     elapsed = time.time() - t0
+    print(f"[God] Analysis complete ({elapsed:.1f}s, {len(output)} chars)")
 
-    # God doesn't execute actions — strip any accidental [TASK] or [ACTION]
-    clean = re.sub(r'\[TASK\].*?\[/TASK\]', '', raw_reply, flags=re.DOTALL)
-    clean = re.sub(r'\[ACTION:[^\]]*\]', '', clean).strip()
+    # 6. Extract summary for chatlog (truncate if too long)
+    summary = output
+    if len(summary) > 1500:
+        summary = "...(analysis truncated)...\n" + summary[-1500:]
 
-    en, zh = parse_bilingual(clean)
-    en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
-    print(f"[God/EN] {en}")
-    if zh != en:
-        print(f"[God/ZH] {zh}")
-    print(f"[God] Guidance ({elapsed:.1f}s)")
-
+    # 7. Log to chatlog
     ts = datetime.datetime.utcnow().strftime("%H:%M")
-    entry = {"speaker": "God", "time": ts, "text": en, "text_zh": zh}
+    entry = {"speaker": "God", "time": ts, "text": summary, "text_zh": summary}
     history.append(entry)
-    set_bubble(HOME, en, zh)
+    set_bubble(HOME, summary[:200], summary[:200])
     post_chatlog(history)
-    persist_turn("God", turn_count, en, zh, [], workflow_state, child_state["stage"])
+    persist_turn("God", turn_count, summary, summary, [], workflow_state, child_state["stage"])
 
 
 _god_cycle = 0  # counter to track when God should speak
