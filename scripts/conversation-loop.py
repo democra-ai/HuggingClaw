@@ -52,7 +52,7 @@ HOME = "https://tao-shen-huggingclaw-home.hf.space"
 ADAM_SPACE = "https://tao-shen-huggingclaw-adam.hf.space"
 EVE_SPACE  = "https://tao-shen-huggingclaw-eve.hf.space"
 GOD_SPACE  = "https://tao-shen-huggingclaw-god.hf.space"
-GOD_TURN_INTERVAL = 3  # God speaks every N Adam/Eve turn pairs
+GOD_POLL_INTERVAL = 120  # God runs every 2 minutes (time-based, not turn-based)
 GOD_WORK_DIR = "/tmp/god-workspace"
 GOD_TIMEOUT = 600  # 10 minutes for God's Claude Code analysis
 HOME_SPACE_ID = "tao-shen/HuggingClaw-Home"
@@ -637,19 +637,11 @@ def enrich_task_with_context(task_desc, ctx):
 #  MODULE 4: LLM & COMMUNICATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-_rate_limit_until = 0.0  # epoch time until which we are rate-limited
+_rate_limited = False  # whether we are currently rate-limited (for logging only)
 
 def call_llm(system_prompt, user_prompt):
-    """Call Zhipu LLM via Anthropic-compatible API with rate-limit backoff."""
-    global _rate_limit_until
-
-    # If rate-limited, sleep until reset instead of wasting calls
-    now = time.time()
-    if _rate_limit_until > now:
-        wait_secs = _rate_limit_until - now
-        print(f"[RATE-LIMIT] Sleeping {wait_secs:.0f}s until reset ({datetime.datetime.utcfromtimestamp(_rate_limit_until).strftime('%Y-%m-%d %H:%M:%S')} UTC)")
-        time.sleep(min(wait_secs + 5, 600))  # cap at 10 min per sleep
-        _rate_limit_until = 0.0  # reset after sleeping
+    """Call Zhipu LLM via Anthropic-compatible API. Returns "" on rate limit (no sleep)."""
+    global _rate_limited
 
     try:
         resp = requests.post(
@@ -679,24 +671,13 @@ def call_llm(system_prompt, user_prompt):
             err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
             err_code = err.get("code") if isinstance(err, dict) else None
             print(f"[error] LLM: {err_msg}", file=sys.stderr)
-            # Detect rate limit (Zhipu error code 1308)
+            # Detect rate limit (Zhipu error code 1308) — just log, don't sleep
             if err_code == 1308 or "使用上限" in err_msg or "rate" in err_msg.lower():
-                # Try to parse reset time from message like "...将在 2026-03-14 12:05:32 重置"
-                m = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', err_msg)
-                if m:
-                    try:
-                        # Zhipu returns Beijing time (UTC+8), convert to UTC
-                        reset_beijing = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-                        reset_utc = reset_beijing - datetime.timedelta(hours=8)
-                        _rate_limit_until = reset_utc.timestamp()
-                        wait = _rate_limit_until - time.time()
-                        print(f"[RATE-LIMIT] Hit! Reset at {m.group(1)} Beijing = {reset_utc.strftime('%H:%M:%S')} UTC ({wait:.0f}s). Will sleep on next call.")
-                    except ValueError:
-                        _rate_limit_until = time.time() + 300  # fallback: 5 min
-                        print(f"[RATE-LIMIT] Hit! Could not parse reset time, backing off 5 min.")
-                else:
-                    _rate_limit_until = time.time() + 300
-                    print(f"[RATE-LIMIT] Hit! No reset time found, backing off 5 min.")
+                if not _rate_limited:
+                    print(f"[RATE-LIMIT] Hit! Will skip turns until reset.")
+                    _rate_limited = True
+            else:
+                _rate_limited = False
     except Exception as e:
         print(f"[error] LLM call failed: {e}", file=sys.stderr)
     return ""
@@ -1352,11 +1333,8 @@ def _prepare_god_context():
 
     # 2. Rate limit status
     lines.append(f"\n## Rate Limit Status")
-    if _rate_limit_until > time.time():
-        reset_str = datetime.datetime.utcfromtimestamp(_rate_limit_until).strftime('%Y-%m-%d %H:%M:%S UTC')
-        wait = int(_rate_limit_until - time.time())
-        lines.append(f"- RATE LIMITED until {reset_str} ({wait}s remaining)")
-        lines.append(f"- Adam & Eve cannot converse until rate limit resets")
+    if _rate_limited:
+        lines.append(f"- RATE LIMITED — Adam & Eve turns return empty, waiting for reset")
     else:
         lines.append(f"- Not rate-limited")
 
@@ -1533,9 +1511,9 @@ You have the SAME capabilities as a human operator running Claude Code locally.
     persist_turn("God", turn_count, summary, summary, [], workflow_state, child_state["stage"])
 
 
-_god_cycle = 0  # counter to track when God should speak
+_last_god_time = 0.0  # timestamp of last God run
 
-# Main loop: Adam → Eve → Adam → Eve → ... with God every N cycles
+# Main loop: Adam → Eve → Adam → Eve → ... with God every 2 minutes
 while True:
     # Refresh Cain's stage periodically
     try:
@@ -1572,17 +1550,15 @@ while True:
         traceback.print_exc(file=sys.stderr)
     time.sleep(wait)
 
-    # God speaks every GOD_TURN_INTERVAL cycles
-    _god_cycle += 1
-    if _god_cycle >= GOD_TURN_INTERVAL:
-        _god_cycle = 0
+    # God runs every GOD_POLL_INTERVAL seconds (2 minutes)
+    if time.time() - _last_god_time >= GOD_POLL_INTERVAL:
+        _last_god_time = time.time()
         try:
             do_god_turn()
         except Exception as e:
             print(f"[ERROR] God turn failed: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
-        time.sleep(TURN_INTERVAL)
 
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]
