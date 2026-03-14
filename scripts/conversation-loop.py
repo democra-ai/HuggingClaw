@@ -1183,7 +1183,8 @@ def build_user_prompt(speaker, other, ctx):
     elif child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
         parts.append(f"\n🚨 {CHILD_NAME} has {child_state['stage']}! IMMEDIATELY write a [TASK] for Claude Code to fix it.")
     elif child_state["alive"] and cc_status.get("result"):
-        parts.append(f"\n✅ {CHILD_NAME} is alive. Claude Code JUST FINISHED a task. Review the result above, then write a NEW [TASK] for the next improvement.")
+        parts.append(f"\n✅ {CHILD_NAME} is alive. Claude Code JUST FINISHED a task. Review the result above, then IMMEDIATELY write a NEW [TASK] for the next improvement.")
+        parts.append(f"DO NOT just discuss or agree with your partner — YOU MUST ASSIGN THE NEXT TASK NOW.")
     elif child_state["alive"]:
         parts.append(f"\n✅ {CHILD_NAME} is alive and Claude Code is IDLE. YOU MUST write a [TASK]...[/TASK] block with specific work for Claude Code. Do NOT just discuss—ACT!")
     else:
@@ -1271,12 +1272,13 @@ def do_turn(speaker, other, space_url):
     turn_count += 1
     _current_speaker = speaker
 
-    # Auto-gather context (lightweight)
-    ctx = gather_context()
-
     # Check if CC just finished — clear result after agents see it once
+    # IMPORTANT: Check this BEFORE gathering context so prompts can use it
     with cc_lock:
         cc_just_finished = (not cc_status["running"] and cc_status["result"])
+
+    # Auto-gather context (lightweight)
+    ctx = gather_context()
 
     # EMERGENCY OVERRIDE: Force a task assignment if agents are stuck in discussion loop OR rate-limited
     # This bypasses the agent when they've discussed for 5+ turns with CC idle and child alive
