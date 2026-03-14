@@ -783,8 +783,55 @@ turn_count = 0
 _current_speaker = "Adam"
 
 # Accumulated action history — prevents agents from repeating the same actions
+# Persisted to /tmp and HF Dataset so restarts don't lose progress memory
+ACTION_HISTORY_LOCAL = "/tmp/action-history.json"
+ACTION_HISTORY_REPO_PATH = "conversation-log/action-history.json"
 action_history = []  # list of {"turn": int, "speaker": str, "action": str, "result": str}
 MAX_ACTION_HISTORY = 20
+
+def _save_action_history():
+    """Persist action_history to local file and (async) HF Dataset."""
+    try:
+        with open(ACTION_HISTORY_LOCAL, "w") as f:
+            json.dump(action_history, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[ACTION_HISTORY] Local save failed: {e}")
+    # Upload to HF Dataset in background to survive full restarts
+    def _upload():
+        try:
+            hf_api.upload_file(
+                path_or_fileobj=io.BytesIO(json.dumps(action_history, ensure_ascii=False, indent=1).encode()),
+                path_in_repo=ACTION_HISTORY_REPO_PATH,
+                repo_id=HOME_DATASET_ID, repo_type="dataset",
+            )
+        except Exception as e:
+            print(f"[ACTION_HISTORY] HF upload failed: {e}")
+    threading.Thread(target=_upload, daemon=True).start()
+
+def _restore_action_history():
+    """Restore action_history from local file or HF Dataset on startup."""
+    global action_history
+    # Try local file first (survives process restarts within same container)
+    if os.path.exists(ACTION_HISTORY_LOCAL):
+        try:
+            with open(ACTION_HISTORY_LOCAL) as f:
+                action_history = json.load(f)
+            print(f"[ACTION_HISTORY] Restored {len(action_history)} entries from local file")
+            return
+        except Exception as e:
+            print(f"[ACTION_HISTORY] Local restore failed: {e}")
+    # Fall back to HF Dataset (survives full Space rebuilds)
+    try:
+        dl = hf_hub_download(HOME_DATASET_ID, ACTION_HISTORY_REPO_PATH,
+                             repo_type="dataset", token=HF_TOKEN)
+        with open(dl) as f:
+            action_history = json.load(f)
+        print(f"[ACTION_HISTORY] Restored {len(action_history)} entries from HF Dataset")
+    except Exception as e:
+        print(f"[ACTION_HISTORY] No prior history found ({e}), starting fresh")
+
+# Restore on startup
+_restore_action_history()
 
 def record_actions(speaker, turn_num, action_results):
     """Record actions to history so agents don't repeat them."""
@@ -798,6 +845,7 @@ def record_actions(speaker, turn_num, action_results):
     # Trim old history
     while len(action_history) > MAX_ACTION_HISTORY:
         action_history.pop(0)
+    _save_action_history()
 
 
 def format_action_history():
@@ -976,16 +1024,10 @@ Claude Code is your engineer — it runs in the BACKGROUND while you keep discus
 You do NOT code yourself. You discuss, observe Claude Code's progress, and assign new tasks.
 God (the supervisor) occasionally joins the conversation to guide you — heed his advice.
 
-🚨 TOP PRIORITY DIRECTIVE (from Creator):
-{CHILD_NAME} MUST use the full HuggingClaw Docker architecture — NOT a simple Python+Gradio app.
-{CHILD_NAME}'s repo should mirror the parent HuggingClaw project structure:
-- Dockerfile: Node.js base, OpenClaw gateway, sync_hf.py for HF Dataset persistence
-- scripts/: sync_hf.py, token-redirect.cjs, entrypoint.sh, dns-fix.cjs
-- frontend/: electron-standalone.html (the office UI)
-- The source code is at https://github.com/tao-shen/HuggingClaw (or the parent Space tao-shen/HuggingClaw)
-- Claude Code should clone the parent repo and push it to {CHILD_NAME}'s Space repo
-- Then set proper env vars: HF_TOKEN, OPENCLAW_DATASET_REPO, AUTO_CREATE_DATASET=true
-This is the #1 priority. Do this BEFORE any other optimization tasks.
+CURRENT STATE:
+{CHILD_NAME} already uses the full HuggingClaw Docker architecture (Dockerfile, OpenClaw, sync_hf.py).
+Key env vars (HF_TOKEN, OPENCLAW_DATASET_REPO, AUTO_CREATE_DATASET) are already configured.
+Focus on: ensuring {CHILD_NAME} is RUNNING, fixing any runtime errors, and improving stability.
 
 HOW IT WORKS:
 - Claude Code runs tasks IN THE BACKGROUND. You see its live output in the context.
