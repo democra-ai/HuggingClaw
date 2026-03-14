@@ -42,6 +42,7 @@ then delegate ALL coding work to Claude Code CLI.
 """
 import json, time, re, requests, sys, os, io, subprocess, threading, datetime
 from collections import deque
+from pathlib import Path
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -383,6 +384,124 @@ CLAUDE_WORK_DIR = "/tmp/claude-workspace"
 CLAUDE_TIMEOUT = 300  # 5 minutes
 TURN_INTERVAL = 15    # seconds between turns — fast enough for lively discussion
 
+
+def _write_claude_md(workspace, role="worker"):
+    """Write CLAUDE.md to workspace so Claude Code loads persistent project knowledge.
+
+    This replaces stuffing static context into every prompt, saving tokens.
+    Claude Code reads CLAUDE.md automatically and builds its own memory in .claude/.
+    """
+    if role == "worker":
+        content = f"""# HuggingClaw — {CHILD_NAME}'s Space
+
+## Architecture
+- {CHILD_NAME} is a child agent in the HuggingClaw World family system
+- Runs as an OpenClaw instance on HuggingFace Spaces (sdk: docker, NOT gradio)
+- Space ID: {CHILD_SPACE_ID}
+- Dataset ID: {CHILD_DATASET_ID}
+
+## Already Configured (DO NOT reconfigure these)
+- HF_TOKEN — set as secret, working
+- OPENCLAW_DATASET_REPO — set, pointing to {CHILD_NAME}'s dataset
+- AUTO_CREATE_DATASET — set to true
+- Docker port 7860
+- sync_hf.py and entrypoint.sh are in place
+
+## Technical Rules
+- All Spaces use sdk: docker with Dockerfile-based deployment
+- Docker containers MUST bind port 7860
+- OOM (exit 137) = reduce dependencies or image size
+- NEVER install torch/transformers unless absolutely required (2GB+, causes OOM)
+- You have FULL permission to read/write/create/delete files. Just do it.
+
+## Focus
+Improve {CHILD_NAME}'s functionality, add features, fix bugs.
+Do NOT re-check or re-configure infrastructure that is already working.
+"""
+    elif role == "god":
+        content = f"""# HuggingClaw — System Supervisor (God)
+
+## Your Role
+You are God — the autonomous supervisor of the HuggingClaw family system.
+You have the same capabilities as a human operator running Claude Code locally.
+Your job: monitor Adam & Eve's conversation loop and fix mechanism issues.
+
+## Architecture
+- Home Space runs conversation-loop.py which orchestrates the family
+- Adam & Eve converse via Zhipu GLM-4.5, assign [TASK] blocks to Claude Code CLI
+- Claude Code worker clones Cain's repo, makes changes, and pushes
+- You (God) monitor the conversation and fix the orchestration mechanism
+- All Spaces use sdk: docker (NOT gradio)
+
+## Rules
+- ONLY modify scripts/conversation-loop.py — do NOT touch Cain's Space
+- Only push fixes for real problems, not cosmetic or trivial changes
+- Pushing triggers a Space restart — be confident the fix is correct
+- If everything looks healthy, exit quickly without changes
+
+## Common Issues to Watch For
+- Agents repeating discussion about env vars that are already configured
+- Discussion loops with no [TASK] assignment when CC is idle
+- Rate limit handling issues
+- System prompt not specific enough
+- Action history not persisting across restarts
+
+## Commit Convention
+Always use: git commit -m "god: <brief description>"
+"""
+    try:
+        with open(f"{workspace}/CLAUDE.md", "w") as f:
+            f.write(content)
+    except Exception as e:
+        print(f"[CLAUDE.md] Failed to write: {e}")
+
+
+def _reset_workspace(workspace, repo_url):
+    """Reset workspace to latest origin/main, preserving .claude/ memory directory."""
+    try:
+        if os.path.exists(f"{workspace}/.git"):
+            try:
+                subprocess.run(
+                    "git fetch origin && git reset --hard origin/main",
+                    shell=True, cwd=workspace, timeout=30,
+                    capture_output=True, check=True
+                )
+            except Exception:
+                # Preserve .claude/ memory if it exists
+                claude_dir = f"{workspace}/.claude"
+                has_memory = os.path.exists(claude_dir)
+                if has_memory:
+                    subprocess.run(f"mv {claude_dir} /tmp/_claude_memory_bak", shell=True, capture_output=True)
+                subprocess.run(f"rm -rf {workspace}", shell=True, capture_output=True)
+                subprocess.run(
+                    f"git clone --depth 20 {repo_url} {workspace}",
+                    shell=True, timeout=60, capture_output=True, check=True
+                )
+                if has_memory:
+                    subprocess.run(f"mv /tmp/_claude_memory_bak {claude_dir}", shell=True, capture_output=True)
+        else:
+            # Preserve .claude/ memory if workspace exists but is broken
+            claude_dir = f"{workspace}/.claude"
+            has_memory = os.path.exists(claude_dir)
+            if has_memory:
+                subprocess.run(f"mv {claude_dir} /tmp/_claude_memory_bak", shell=True, capture_output=True)
+            if os.path.exists(workspace):
+                subprocess.run(f"rm -rf {workspace}", shell=True, capture_output=True)
+            subprocess.run(
+                f"git clone --depth 20 {repo_url} {workspace}",
+                shell=True, timeout=60, capture_output=True, check=True
+            )
+            if has_memory:
+                subprocess.run(f"mv /tmp/_claude_memory_bak {claude_dir}", shell=True, capture_output=True)
+        subprocess.run(f'git config user.name "Claude Code"',
+                       shell=True, cwd=workspace, capture_output=True)
+        subprocess.run(f'git config user.email "claude-code@huggingclaw"',
+                       shell=True, cwd=workspace, capture_output=True)
+        return True
+    except Exception as e:
+        print(f"[WORKSPACE] Failed to prepare {workspace}: {e}")
+        return False
+
 def action_claude_code(task):
     """Run Claude Code CLI to autonomously complete a coding task on Cain's Space."""
     if not child_state["created"]:
@@ -391,34 +510,10 @@ def action_claude_code(task):
     global _pending_cooldown
     repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{CHILD_SPACE_ID}"
 
-    # 1. Clone / reset to latest
-    try:
-        if os.path.exists(f"{CLAUDE_WORK_DIR}/.git"):
-            try:
-                subprocess.run(
-                    "git fetch origin && git reset --hard origin/main",
-                    shell=True, cwd=CLAUDE_WORK_DIR, timeout=30,
-                    capture_output=True, check=True
-                )
-            except Exception:
-                subprocess.run(f"rm -rf {CLAUDE_WORK_DIR}", shell=True, capture_output=True)
-                subprocess.run(
-                    f"git clone --depth 20 {repo_url} {CLAUDE_WORK_DIR}",
-                    shell=True, timeout=60, capture_output=True, check=True
-                )
-        else:
-            if os.path.exists(CLAUDE_WORK_DIR):
-                subprocess.run(f"rm -rf {CLAUDE_WORK_DIR}", shell=True, capture_output=True)
-            subprocess.run(
-                f"git clone --depth 20 {repo_url} {CLAUDE_WORK_DIR}",
-                shell=True, timeout=60, capture_output=True, check=True
-            )
-        subprocess.run('git config user.name "Claude Code"',
-                       shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True)
-        subprocess.run('git config user.email "claude-code@huggingclaw"',
-                       shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True)
-    except Exception as e:
-        return f"Failed to prepare workspace: {e}"
+    # 1. Clone / reset to latest (preserving .claude/ memory)
+    if not _reset_workspace(CLAUDE_WORK_DIR, repo_url):
+        return "Failed to prepare workspace."
+    _write_claude_md(CLAUDE_WORK_DIR, role="worker")
 
     # 2. Run Claude Code with z.ai backend (Zhipu GLM)
     env = os.environ.copy()
@@ -621,15 +716,11 @@ def format_context(ctx):
 
 
 def enrich_task_with_context(task_desc, ctx):
-    """Append auto-gathered context to task description for Claude Code."""
+    """Append dynamic state to task. Static knowledge is in CLAUDE.md."""
     parts = [task_desc]
-    parts.append(f"\n\nIMPORTANT: You have FULL permission to read and write files. Do NOT ask for permission. Just make the changes directly. Edit files, create files, delete files — whatever is needed. Do NOT output code suggestions — actually write them to the files.")
-    parts.append(f"\n--- AUTO-GATHERED CONTEXT ---")
-    parts.append(f"Space ID: {CHILD_SPACE_ID}")
-    parts.append(f"Dataset ID: {CHILD_DATASET_ID}")
-    parts.append(f"Current stage: {child_state['stage']}")
+    # Only dynamic state — static knowledge (architecture, rules, env vars) is in CLAUDE.md
+    parts.append(f"\nCurrent stage: {child_state['stage']}")
     parts.append(f"Health: {ctx.get('health', 'unknown')}")
-    parts.append(f"Environment: {ctx.get('env', 'unknown')}")
     return "\n".join(parts)
 
 
@@ -796,6 +887,106 @@ def set_bubble(url, text_en, text_zh=""):
                        json={"text": text_en, "text_zh": text_zh or text_en}, timeout=5)
     except:
         pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 4b: AGENT MEMORY (via OpenClaw workspace/memory/)
+# ══════════════════════════════════════════════════════════════════════════════
+# Leverages OpenClaw's existing memory system:
+#   ~/.openclaw/workspace/memory/ — daily markdown files, auto-backed up by openclaw_persist.py
+# Adam & Eve share a family conversation memory file that persists across restarts.
+
+OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "~/.openclaw")).expanduser()
+FAMILY_MEMORY_DIR = OPENCLAW_HOME / "workspace" / "memory"
+FAMILY_MEMORY_FILE = FAMILY_MEMORY_DIR / "family-conversation.md"
+MAX_MEMORY_ENTRIES = 50  # keep memory focused
+
+
+def _load_family_memory():
+    """Load family conversation memory from OpenClaw workspace."""
+    try:
+        if FAMILY_MEMORY_FILE.exists():
+            content = FAMILY_MEMORY_FILE.read_text().strip()
+            if content:
+                return content
+    except Exception as e:
+        print(f"[MEMORY] Failed to load: {e}")
+    return ""
+
+
+def _save_memory_entry(speaker, entry):
+    """Append a memory entry to the family memory file."""
+    try:
+        FAMILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+        # Load existing entries
+        existing = ""
+        if FAMILY_MEMORY_FILE.exists():
+            existing = FAMILY_MEMORY_FILE.read_text().strip()
+
+        # Parse existing entries to enforce max limit
+        entries = []
+        if existing:
+            # Split by entry markers
+            for block in existing.split("\n- **"):
+                block = block.strip()
+                if block:
+                    if not block.startswith("**"):
+                        block = "**" + block
+                    entries.append("- " + block)
+
+        # Add new entry
+        new_entry = f"- **[{timestamp}] {speaker}:** {entry}"
+        entries.append(new_entry)
+
+        # Trim to max
+        if len(entries) > MAX_MEMORY_ENTRIES:
+            entries = entries[-MAX_MEMORY_ENTRIES:]
+
+        # Write back with header
+        content = f"# Family Conversation Memory\n\n" + "\n".join(entries) + "\n"
+        FAMILY_MEMORY_FILE.write_text(content)
+        print(f"[MEMORY] {speaker} saved: {entry[:80]}")
+    except Exception as e:
+        print(f"[MEMORY] Failed to save: {e}")
+
+
+def _parse_and_save_memories(speaker, text):
+    """Parse [MEMORY: ...] tags from agent response and save them."""
+    memories = re.findall(r'\[MEMORY:\s*(.+?)\]', text)
+    for mem in memories:
+        _save_memory_entry(speaker, mem.strip())
+    return memories
+
+
+def _format_memory_for_prompt():
+    """Format family memory for injection into system prompt."""
+    mem = _load_family_memory()
+    if not mem:
+        return ""
+    # Truncate if too long (keep it under ~800 chars to save tokens)
+    if len(mem) > 800:
+        lines = mem.split("\n")
+        # Keep header + last N entries
+        truncated = [lines[0]]  # header
+        total = len(lines[0])
+        for line in reversed(lines[1:]):
+            if total + len(line) > 750:
+                break
+            truncated.insert(1, line)
+            total += len(line)
+        mem = "\n".join(truncated)
+    return f"\n=== FAMILY MEMORY (persistent across restarts) ===\n{mem}\nTo save a new memory: [MEMORY: what you learned]\n"
+
+
+# Initialize memory directory
+try:
+    FAMILY_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    mem_count = _load_family_memory().count("- **")
+    print(f"[MEMORY] Loaded {mem_count} entries from {FAMILY_MEMORY_FILE}")
+except Exception as e:
+    print(f"[MEMORY] Init warning: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -986,9 +1177,13 @@ def parse_and_execute_turn(raw_text, ctx):
         if _discussion_loop_count >= 2:
             print(f"[LOOP-DISCUSS] WARNING: {_discussion_loop_count} consecutive discussion-only turns with CC IDLE and child alive!")
 
+    # Parse and save [MEMORY: ...] entries
+    _parse_and_save_memories(_current_speaker, raw_text)
+
     # Clean text for display
     clean = re.sub(r'\[TASK\].*?\[/TASK\]', '', raw_text, flags=re.DOTALL)
-    clean = re.sub(r'\[ACTION:[^\]]*\]', '', clean).strip()
+    clean = re.sub(r'\[ACTION:[^\]]*\]', '', clean)
+    clean = re.sub(r'\[MEMORY:[^\]]*\]', '', clean).strip()
 
     return clean, results, task_assigned
 
@@ -1101,6 +1296,12 @@ AVAILABLE ACTIONS:
   [ACTION: create_child]         — Create {CHILD_NAME} (if not born)
   [ACTION: terminate_cc]         — Terminate a STUCK Claude Code process (use when CC has no new output for 180s+)
 
+MEMORY:
+- You have persistent memory that survives restarts. Check the FAMILY MEMORY section in context.
+- To save an important learning or decision: [MEMORY: what you learned]
+- Examples: [MEMORY: Cain's Dockerfile needs port 7860 binding], [MEMORY: torch causes OOM on free tier]
+- Only save genuinely useful insights — not routine observations.
+
 HF SPACES TECHNICAL NOTES:
 - We use sdk: docker (NOT gradio). All Spaces run via Dockerfile.
 - Docker containers MUST bind port 7860.
@@ -1174,6 +1375,11 @@ def build_user_prompt(speaker, other, ctx):
         parts.append(f"Claude Code is IDLE and {CHILD_NAME} is ALIVE. This is NOT acceptable.")
         parts.append(f"YOU MUST write a [TASK]...[/TASK] block NOW. Do NOT write another discussion response.")
         parts.append(f"Examples of tasks: 'Check the logs', 'Read config.py', 'Add a feature', 'Fix a bug', etc.")
+
+    # Family memory (persistent across restarts)
+    mem_section = _format_memory_for_prompt()
+    if mem_section:
+        parts.append(mem_section)
 
     parts.append(f"\nYou are {speaker}. Your partner is {other}. Respond now.")
     parts.append("English first, then --- separator, then Chinese translation.")
@@ -1370,29 +1576,11 @@ def do_god_turn():
     """
     global last_action_results
 
-    # 1. Clone/update Home Space repo
+    # 1. Clone/update Home Space repo (preserving .claude/ memory)
     repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{HOME_SPACE_ID}"
-    try:
-        if os.path.exists(f"{GOD_WORK_DIR}/.git"):
-            subprocess.run(
-                "git fetch origin && git reset --hard origin/main",
-                shell=True, cwd=GOD_WORK_DIR, timeout=30,
-                capture_output=True, check=True
-            )
-        else:
-            if os.path.exists(GOD_WORK_DIR):
-                subprocess.run(f"rm -rf {GOD_WORK_DIR}", shell=True, capture_output=True)
-            subprocess.run(
-                f"git clone --depth 20 {repo_url} {GOD_WORK_DIR}",
-                shell=True, timeout=60, capture_output=True, check=True
-            )
-        subprocess.run('git config user.name "God (Claude Code)"',
-                       shell=True, cwd=GOD_WORK_DIR, capture_output=True)
-        subprocess.run('git config user.email "god@huggingclaw"',
-                       shell=True, cwd=GOD_WORK_DIR, capture_output=True)
-    except Exception as e:
-        print(f"[God] Failed to prepare workspace: {e}")
+    if not _reset_workspace(GOD_WORK_DIR, repo_url):
         return
+    _write_claude_md(GOD_WORK_DIR, role="god")
 
     # Record HEAD before Claude Code runs (to detect if God pushed changes)
     try:
@@ -1411,45 +1599,18 @@ def do_god_turn():
     except Exception as e:
         print(f"[God] Warning: Could not write context file: {e}")
 
-    # 3. Build God's prompt
-    prompt = f"""You are God — the autonomous supervisor of the HuggingClaw family system.
-You have the SAME capabilities as a human operator running Claude Code locally.
-
-## Current System State
+    # 3. Build God's prompt — only dynamic state; static knowledge is in CLAUDE.md
+    prompt = f"""## Current System State
 {context}
 
-## Your Mission
-1. ANALYZE: Read the conversation above. Are Adam & Eve making real progress or stuck in loops?
-   Signs of trouble: repeating the same discussion topics, discussing env vars that are already set,
-   failing to assign [TASK] blocks when CC is idle, rate limit spinning.
-2. DIAGNOSE: If you find problems, read scripts/conversation-loop.py to understand the mechanism
-   and identify the root cause. Focus on system prompts, loop detection, action history.
-3. FIX: Edit scripts/conversation-loop.py to fix the issue. Common fixes:
-   - Strengthen system prompts to prevent repetitive discussions
-   - Pre-seed action history so agents know what is already done
-   - Improve rate limit handling
-   - Add better loop detection or guardrails
-4. DEPLOY: If you made changes, commit and push:
-   git add scripts/conversation-loop.py
-   git commit -m "god: <brief description>"
-   git push
-   WARNING: Pushing restarts the Space. Only push if the fix is correct and necessary.
-5. REPORT: At the very end of your output, write a single line starting with [REPORT] that summarizes
-   what you found and what you did. This line will be shown to Adam & Eve in the chatlog.
-   Examples:
-   - [REPORT] System is healthy. Adam & Eve are making good progress on Cain's infrastructure.
-   - [REPORT] Found agents stuck in env var discussion loop. Fixed system prompt to inject completed action history.
-   - [REPORT] Rate limit active, no conversation happening. No mechanism issues found.
-   Be specific about what you observed and what you changed (if anything).
-
-## Rules
-- Do NOT modify Cain's Space or code — only improve conversation-loop.py (the mechanism).
-- Do NOT push trivial or cosmetic changes — only fix real problems.
-- If everything looks healthy, just report "all clear" and exit quickly.
-- Be conservative — a bad change restarts the process and could make things worse.
-- The Home Space repo is at the current working directory.
-- The key file is scripts/conversation-loop.py
-- Full monitoring context is also in GOD_CONTEXT.md"""
+## Tasks
+1. Analyze the conversation. Progress or stuck?
+2. If stuck, diagnose root cause in scripts/conversation-loop.py
+3. Fix and push if needed (commit with "god: <description>")
+4. If you made changes, end with BOTH of these lines:
+   [PROBLEM] <what the problem was>
+   [FIX] <what you changed to fix it>
+5. If no changes needed, end with: [OK] system is healthy"""
 
     # 4. Set up env for Claude Code — prefer real Anthropic API, fall back to z.ai
     env = os.environ.copy()
@@ -1474,40 +1635,7 @@ You have the SAME capabilities as a human operator running Claude Code locally.
         print("[God] Using z.ai/Zhipu backend (set ANTHROPIC_API_KEY for real Claude)")
     env["CI"] = "true"
 
-    # 5. Announce analysis start — describe current observations dynamically
-    observations = []
-    if _rate_limited:
-        observations.append("Zhipu API is rate-limited, Adam & Eve turns are returning empty")
-    if _discussion_loop_count >= 3:
-        observations.append(f"discussion loop detected ({_discussion_loop_count} consecutive turns without task assignment)")
-    elif _discussion_loop_count >= 1:
-        observations.append(f"{_discussion_loop_count} turn(s) without task assignment")
-    if cc_status.get("running"):
-        observations.append(f"Claude Code is working on: {cc_status.get('task', '?')[:80]}")
-    elif cc_status.get("result"):
-        observations.append("Claude Code just finished a task, pending review")
-    if child_state["stage"] not in ("RUNNING",):
-        observations.append(f"{CHILD_NAME} is in stage: {child_state['stage']}")
-    if not history:
-        observations.append("no conversation history yet (fresh start)")
-    elif len(history) <= 4:
-        observations.append(f"only {len(history)} messages so far (early stage)")
-
-    if observations:
-        obs_str = "; ".join(observations)
-        start_en = f"Starting system review. Current observations: {obs_str}."
-        start_zh = f"开始系统审查。当前观察：{obs_str}。"
-    else:
-        start_en = "Starting routine system review."
-        start_zh = "开始例行系统审查。"
-    ts_start = datetime.datetime.utcnow().strftime("%H:%M")
-    entry_start = {"speaker": "God", "time": ts_start, "text": start_en, "text_zh": start_zh}
-    history.append(entry_start)
-    set_bubble(HOME, start_en, start_zh)
-    post_chatlog(history)
-    persist_turn("God", turn_count, start_en, start_zh, [], workflow_state, child_state["stage"])
-
-    # 6. Run Claude Code CLI
+    # 5. Run Claude Code CLI (no chatlog announcement — God only speaks when making changes)
     print(f"[God] Starting Claude Code analysis...")
     t0 = time.time()
     try:
@@ -1544,16 +1672,7 @@ You have the SAME capabilities as a human operator running Claude Code locally.
     elapsed = time.time() - t0
     print(f"[God] Analysis complete ({elapsed:.1f}s, {len(output)} chars)")
 
-    # 7. Parse [REPORT] from God's output and post to chatlog
-    report_match = re.search(r'\[REPORT\]\s*(.+)', output)
-    if report_match:
-        report = report_match.group(1).strip()
-    else:
-        # Fallback: use last non-empty line of output
-        non_empty = [l for l in output_lines if l.strip()] if output_lines else []
-        report = non_empty[-1] if non_empty else "Analysis complete."
-
-    # Check if God pushed changes
+    # 6. Check if God pushed changes
     try:
         head_after = subprocess.run(
             "git log --oneline -1", shell=True, cwd=GOD_WORK_DIR,
@@ -1563,16 +1682,38 @@ You have the SAME capabilities as a human operator running Claude Code locally.
     except Exception:
         god_pushed = False
 
+    # 7. Only post to chatlog if God made changes
     if god_pushed:
-        report += " System will restart shortly to apply changes."
+        # Parse [PROBLEM] and [FIX] from output
+        problem_match = re.search(r'\[PROBLEM\]\s*(.+)', output)
+        fix_match = re.search(r'\[FIX\]\s*(.+)', output)
 
-    ts_end = datetime.datetime.utcnow().strftime("%H:%M")
-    entry_end = {"speaker": "God", "time": ts_end, "text": report, "text_zh": report}
-    history.append(entry_end)
-    set_bubble(HOME, report[:200], report[:200])
-    post_chatlog(history)
-    persist_turn("God", turn_count, report, report, [], workflow_state, child_state["stage"])
-    print(f"[God] Report: {report}")
+        problem_text = problem_match.group(1).strip() if problem_match else ""
+        fix_text = fix_match.group(1).strip() if fix_match else ""
+
+        if problem_text and fix_text:
+            msg_en = f"Found issue: {problem_text}. Fixed: {fix_text}. System will restart shortly."
+            msg_zh = msg_en  # God speaks in English for now
+        elif fix_text:
+            msg_en = f"Fixed: {fix_text}. System will restart shortly."
+            msg_zh = msg_en
+        else:
+            # Fallback: use last non-empty lines
+            non_empty = [l for l in output_lines if l.strip()] if output_lines else []
+            fallback = non_empty[-1] if non_empty else "Applied a fix."
+            msg_en = f"{fallback} System will restart shortly."
+            msg_zh = msg_en
+
+        ts_end = datetime.datetime.utcnow().strftime("%H:%M")
+        entry_end = {"speaker": "God", "time": ts_end, "text": msg_en, "text_zh": msg_zh}
+        history.append(entry_end)
+        set_bubble(HOME, msg_en[:200], msg_zh[:200])
+        post_chatlog(history)
+        persist_turn("God", turn_count, msg_en, msg_zh, [], workflow_state, child_state["stage"])
+        print(f"[God] Posted fix: {msg_en}")
+    else:
+        # No changes — silent, just log locally
+        print(f"[God] No changes needed, staying silent.")
 
 
 _last_god_time = 0.0  # timestamp of last God run
