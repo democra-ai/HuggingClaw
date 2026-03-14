@@ -10,3 +10,4 @@ node_modules/
 *.log
 .DS_Store
 frontend/index.html
+scripts/__pycache__/
