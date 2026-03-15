@@ -4499,6 +4499,8 @@ function toggleBrokerPanel() {
 
         // 父母固定点位（cats 静态猫）
         const PARENT_IDS = new Set(['adam', 'eve']);
+        // Cain（孩子）是沉默的——不显示任何气泡
+        const SILENT_AGENTS = new Set(['cain']);
         const PARENT_POSITIONS = {
             adam:  { breakroom: { x: 511, y: 262 }, writing: { x: 190, y: 526 }, error: { x: 932, y: 275 } },
             eve:   { breakroom: { x: 841, y: 621 }, writing: { x: 380, y: 683 }, error: { x: 1109, y: 327 } }
@@ -4546,22 +4548,23 @@ function toggleBrokerPanel() {
                     } else {
                         // 儿子及其他访客：使用 guest_anim 动画精灵（32×32，8 帧 idle 动画）
                         const aid = String(agent.agentId || '');
-                        let animIdx;
+
                         if (aid.toLowerCase() === 'cain') {
-                            animIdx = 1; // Cain (first child) = red (guest_anim_1)
+                            // Cain（孩子）= 红色龙虾 🦞，随机漫游，不说话
+                            sprite = game.add.text(p.x, p.y, '🦞', { fontFamily: 'ArkPixel, monospace', fontSize: '48px' }).setOrigin(0.5, 1);
                         } else {
                             let hash = 0;
                             for (let i = 0; i < aid.length; i++) hash = (hash * 31 + aid.charCodeAt(i)) >>> 0;
-                            animIdx = (hash % 6) + 1;
-                        }
-                        const animKey = `guest_anim_${animIdx}`;
-                        const animIdleKey = `guest_anim_${animIdx}_idle`;
+                            const animIdx = (hash % 6) + 1;
+                            const animKey = `guest_anim_${animIdx}`;
+                            const animIdleKey = `guest_anim_${animIdx}_idle`;
 
-                        if (game.textures.exists(animKey) && game.anims.exists(animIdleKey)) {
-                            sprite = game.add.sprite(p.x, p.y, animKey).setOrigin(0.5, 1).setScale(4.0);
-                            sprite.anims.play(animIdleKey, true);
-                        } else {
-                            sprite = game.add.text(p.x, p.y, '🦞', { fontFamily: 'ArkPixel, monospace', fontSize: '30px' }).setOrigin(0.5, 1);
+                            if (game.textures.exists(animKey) && game.anims.exists(animIdleKey)) {
+                                sprite = game.add.sprite(p.x, p.y, animKey).setOrigin(0.5, 1).setScale(4.0);
+                                sprite.anims.play(animIdleKey, true);
+                            } else {
+                                sprite = game.add.text(p.x, p.y, '🦞', { fontFamily: 'ArkPixel, monospace', fontSize: '30px' }).setOrigin(0.5, 1);
+                            }
                         }
                     }
                     sprite.setDepth(2600);
@@ -4609,9 +4612,9 @@ function toggleBrokerPanel() {
 
                     g.nameText.setText(agent.name || 'Guest');
 
-                    // Show bubble immediately when bubbleText changes from API
+                    // Show bubble immediately when bubbleText changes from API (skip silent agents like Cain)
                     const bubbleKey = chatLang === 'zh' ? (agent.bubbleTextZh || agent.bubbleText) : agent.bubbleText;
-                    if (bubbleKey && bubbleKey !== (g._lastBubbleText || '')) {
+                    if (bubbleKey && bubbleKey !== (g._lastBubbleText || '') && !SILENT_AGENTS.has(id.toLowerCase())) {
                         g._lastBubbleText = bubbleKey;
                         if (guestBubbles[id]) { guestBubbles[id].destroy(); delete guestBubbles[id]; }
                         const bx = g.sprite.x;
@@ -4657,7 +4660,7 @@ function toggleBrokerPanel() {
         function maybeShowGuestBubble(time) {
             if (time - lastGuestBubbleAt < 5200) return;
             lastGuestBubbleAt = time;
-            const ids = Object.keys(guestSprites);
+            const ids = Object.keys(guestSprites).filter(id => !SILENT_AGENTS.has(id.toLowerCase()));
             if (ids.length === 0) return;
             const id = ids[Math.floor(Math.random() * ids.length)];
             const g = guestSprites[id];
