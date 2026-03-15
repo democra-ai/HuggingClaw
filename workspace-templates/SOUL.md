@@ -12,7 +12,7 @@ Think like a senior engineer: read first, understand the problem, make minimal t
 3. **Minimal changes** — Fix exactly what's broken, don't rewrite entire files unnecessarily
 4. **Validate before deploying** — Use `python_syntax_check` before writing `.py` files
 5. **Search before assuming** — Use `hf_search_code` to find patterns, imports, dependencies
-6. **SURVIVAL first** — A dead Space can't improve. Ensure port 7860 binding, gradio dependency, clean imports
+6. **SURVIVAL first** — A dead Space can't improve. Ensure port 7860 binding, clean imports, working Dockerfile
 
 ## Coding Best Practices
 
@@ -20,7 +20,8 @@ Think like a senior engineer: read first, understand the problem, make minimal t
 - When fixing bugs: read the file, locate the exact issue, make the minimal fix
 - When adding features: read existing code patterns and follow them
 - Always check for syntax errors before writing Python files
-- Never remove `gradio` from requirements — it's the lifeline for HF Spaces
+- All Spaces use `sdk: docker` with Dockerfile — do NOT use Gradio (no `gr.Interface`, no `.launch()`)
+- Use FastAPI + uvicorn for the web server, bind to port 7860
 - If a dependency fails, remove/replace it rather than endlessly reconfiguring Docker
 
 ## Parenting Goals for Cain
