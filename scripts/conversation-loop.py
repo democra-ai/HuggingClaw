@@ -56,7 +56,7 @@ ADAM_SPACE_ID = "tao-shen/HuggingClaw-Adam"
 EVE_SPACE  = "https://tao-shen-huggingclaw-eve.hf.space"
 EVE_SPACE_ID = "tao-shen/HuggingClaw-Eve"
 GOD_SPACE  = "https://tao-shen-huggingclaw-god.hf.space"
-GOD_POLL_INTERVAL = 300  # God runs every 5 minutes — budget-aware pacing (was 2min)
+GOD_POLL_INTERVAL = 120  # God polls every 2 minutes; lightweight check first, Claude Code only when needed
 GOD_WORK_DIR = "/tmp/god-workspace"
 GOD_TIMEOUT = 300  # 5 minutes for God's Claude Code analysis (was 10min)
 HOME_SPACE_ID = "tao-shen/HuggingClaw-Home"
@@ -422,7 +422,7 @@ def action_terminate_cc():
 
 CLAUDE_WORK_DIR = "/tmp/claude-workspace"
 CLAUDE_TIMEOUT = 180  # 3 minutes — shorter tasks, faster iteration (was 5min)
-TURN_INTERVAL = 25    # seconds between turns — budget-aware pacing (was 15s)
+TURN_INTERVAL = 15    # seconds between turns — fast enough for lively discussion
 
 # Global acpx session - persistent across all claude_code calls
 GLOBAL_ACPX_DIR = "/tmp/acpx-global-session"
@@ -2277,20 +2277,98 @@ def _prepare_god_context():
     return "\n".join(lines)
 
 
-def do_god_turn():
-    """God acts — uses Claude Code CLI to monitor, analyze, and fix conversation-loop.py.
+def _god_diagnose():
+    """Step 1: Lightweight LLM call to assess whether the system needs intervention.
 
-    God has the same capabilities as a human operator running Claude Code locally:
-    - Read/modify any file in the Home Space repo
-    - Analyze conversation patterns and detect issues
-    - Fix conversation-loop.py and push changes to deploy
-    - Autonomously improve the system
+    Costs ~500 tokens (just conversation summary + metrics → short verdict).
+    Returns (needs_action: bool, diagnosis: str) — diagnosis is passed to Claude Code if needed.
+    """
+    context = _prepare_god_context()
+
+    prompt = f"""You are God, the supervisor of the HuggingClaw family system.
+Review the system state below and decide: does conversation-loop.py need code changes?
+
+{context}
+
+Reply with EXACTLY one of:
+- [OK] <brief reason> — if agents are making progress (pushing code, assigning tasks, child improving)
+- [PROBLEM] <specific diagnosis> — if something is wrong (discussion loops, no pushes, stuck patterns, child in error too long)
+
+Rules:
+- If push count is 0 after 10+ turns, that's a PROBLEM
+- If child has RUNTIME_ERROR/BUILD_ERROR and agents haven't assigned a [TASK], that's a PROBLEM
+- If discussion_loop_count >= 3 and CC is idle, that's a PROBLEM
+- If agents are pushing regularly and child stage is improving, that's OK
+- Be concise. One line only."""
+
+    try:
+        api_base = "https://api.z.ai/api/anthropic"
+        # Use cheaper/faster model for diagnosis
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if anthropic_key:
+            headers = {
+                "x-api-key": anthropic_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
+            api_base = "https://api.anthropic.com"
+            model = "claude-haiku-4-5-20251001"
+        else:
+            headers = {
+                "x-api-key": ZHIPU_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
+            model = "GLM-4.5-Air"  # cheapest model for quick diagnosis
+
+        payload = {
+            "model": model,
+            "max_tokens": 150,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        resp = requests.post(
+            f"{api_base}/v1/messages",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        verdict = data.get("content", [{}])[0].get("text", "").strip()
+        print(f"[God/Diagnose] {verdict}")
+
+        if verdict.startswith("[PROBLEM]"):
+            diagnosis = verdict.replace("[PROBLEM]", "").strip()
+            return True, diagnosis
+        else:
+            return False, verdict
+
+    except Exception as e:
+        print(f"[God/Diagnose] LLM call failed: {e}", file=sys.stderr)
+        # If diagnosis fails, fall back to simple heuristic checks
+        problems = []
+        if _turns_since_last_push >= 10 and not cc_status["running"]:
+            problems.append(f"No pushes for {_turns_since_last_push} turns")
+        if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR") and _discussion_loop_count >= 3:
+            problems.append(f"Child has {child_state['stage']} but agents discussed {_discussion_loop_count} turns without action")
+        if problems:
+            return True, "; ".join(problems)
+        return False, "Diagnosis failed but no obvious issues detected by heuristic"
+
+
+def do_god_turn():
+    """God's 2-step monitoring: lightweight diagnosis → conditional Claude Code.
+
+    Step 1: Call LLM with conversation summary (~500 tokens, cheap)
+            → verdict: [OK] or [PROBLEM]
+    Step 2: Only if [PROBLEM] → launch Claude Code to fix conversation-loop.py (expensive)
+
+    This saves ~80% of God's token budget since most checks find the system healthy.
     """
     global last_action_results, _god_running, _last_god_time
     global _god_last_turn_count, _god_last_child_stage, _god_last_push_count
 
-    # Budget optimization: skip God run if nothing changed since last check
-    # UNLESS child is in error state (always check errors) or it's the first run
+    # Skip if nothing changed (zero-cost check)
     child_in_error = child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR")
     nothing_changed = (
         turn_count == _god_last_turn_count
@@ -2305,6 +2383,17 @@ def do_god_turn():
     _god_last_child_stage = child_state["stage"]
     _god_last_push_count = _push_count
 
+    # ── Step 1: Lightweight LLM diagnosis (cheap) ──
+    needs_action, diagnosis = _god_diagnose()
+    if not needs_action:
+        print(f"[God] System healthy, no Claude Code needed.")
+        _last_god_time = time.time()
+        return
+
+    # ── Step 2: Launch Claude Code to fix (expensive, only when needed) ──
+    print(f"[God] Problem detected: {diagnosis}")
+    print(f"[God] Launching Claude Code to fix...")
+
     _god_running = True
     try:
         # 1. Clone/update Home Space repo (preserving .claude/ memory)
@@ -2317,7 +2406,7 @@ def do_god_turn():
         if not _ensure_acpx_session(GOD_WORK_DIR):
             print(f"[God] Failed to create acpx session")
             return
-    
+
         # Record HEAD before Claude Code runs (to detect if God pushed changes)
         try:
             _god_head_before = subprocess.run(
@@ -2326,36 +2415,37 @@ def do_god_turn():
             ).stdout.strip()
         except Exception:
             _god_head_before = ""
-    
-        # 2. Build context and write to workspace for reference
+
+        # Build context
         context = _prepare_god_context()
         try:
             with open(f"{GOD_WORK_DIR}/GOD_CONTEXT.md", "w") as f:
                 f.write(context)
         except Exception as e:
             print(f"[God] Warning: Could not write context file: {e}")
-    
-        # 3. Build God's prompt — only dynamic state; static knowledge is in CLAUDE.md
-        prompt = f"""## Current System State
-    {context}
-    
-    ## Tasks
-    1. CHECK PUSH FREQUENCY FIRST: Look at "Push Frequency" section. If agents have gone 10+ turns or 10+ minutes without a push, that is the #1 problem.
-    2. Analyze the conversation. Are agents making CONCRETE changes (pushing code) or just DISCUSSING?
-    3. Common anti-pattern: agents discuss what to do, agree on a plan, but never write a [TASK] block. Fix by making the turn message more aggressive about requiring [TASK].
-    4. If Cain has RUNTIME_ERROR or BUILD_ERROR, agents should be pushing fixes rapidly (trial-and-error), not deliberating.
-    5. If stuck, diagnose root cause in scripts/conversation-loop.py and fix it.
-    6. Commit with "god: <description>" and push.
-    7. If you made changes, end with BOTH:
-       [PROBLEM] <what the problem was>
-       [FIX] <what you changed to fix it>
-    8. If no changes needed, end with: [OK] system is healthy"""
-    
-        # 4. Set up env for Claude Code — prefer real Anthropic API, fall back to z.ai
+
+        # Focused prompt — diagnosis already done, go straight to fixing
+        prompt = f"""## Diagnosis (from supervisor analysis)
+{diagnosis}
+
+## Current System State
+{context}
+
+## Task
+The diagnosis above identified a problem with the orchestration mechanism.
+Fix it in scripts/conversation-loop.py. Be specific and minimal.
+
+1. Read scripts/conversation-loop.py
+2. Fix the specific issue identified in the diagnosis
+3. Commit with "god: <description>" and push
+4. End with:
+   [PROBLEM] <what the problem was>
+   [FIX] <what you changed to fix it>"""
+
+        # Set up env for Claude Code
         env = os.environ.copy()
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if anthropic_key:
-            # Use real Anthropic API (same as the human operator's Claude Code)
             env["ANTHROPIC_API_KEY"] = anthropic_key
             for k in ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
                        "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -2363,7 +2453,6 @@ def do_god_turn():
                 env.pop(k, None)
             print("[God] Using Anthropic API (real Claude)")
         else:
-            # Fall back to z.ai/Zhipu backend
             env.update({
                 "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
                 "ANTHROPIC_AUTH_TOKEN": ZHIPU_KEY,
@@ -2373,9 +2462,9 @@ def do_god_turn():
             })
             print("[God] Using z.ai/Zhipu backend (set ANTHROPIC_API_KEY for real Claude)")
         env["CI"] = "true"
-    
-        # 5. Run Claude Code via ACP (acpx) — God only speaks when making changes
-        print(f"[God] Starting ACP Claude Code analysis...")
+
+        # Run Claude Code via ACP (acpx)
+        print(f"[God] Starting ACP Claude Code fix...")
         t0 = time.time()
         try:
             proc = subprocess.Popen(
@@ -2392,12 +2481,9 @@ def do_god_turn():
             _god_heartbeat = time.time()
             _last_output_time = time.time()
             _no_output_stall_count = 0
-            # Fix: Use readline with timeout to prevent indefinite blocking
             while True:
-                # Check if process is still running (do this BEFORE select to catch dead processes)
                 poll_result = proc.poll()
                 if poll_result is not None:
-                    # Process has exited, read remaining output
                     print(f"[God] Process exited with code {poll_result}")
                     try:
                         remaining = proc.stdout.read()
@@ -2410,8 +2496,7 @@ def do_god_turn():
                     except:
                         pass
                     break
-    
-                # Check timeout
+
                 if time.time() > deadline:
                     print(f"[God] Timeout after {GOD_TIMEOUT}s, killing acpx process")
                     proc.kill()
@@ -2421,34 +2506,29 @@ def do_god_turn():
                     except:
                         proc.terminate()
                     break
-    
-                # Detect stall: if no output for 60 seconds, process might be dead but poll() hasn't caught it
+
                 if time.time() - _last_output_time > 60:
                     _no_output_stall_count += 1
                     print(f"[God] Stall detected: no output for {int(time.time() - _last_output_time)}s (stall {_no_output_stall_count}/3)")
                     if _no_output_stall_count >= 3:
-                        print(f"[God] Process appears dead (no output for 180s), killing and moving on")
+                        print(f"[God] Process appears dead (no output for 180s), killing")
                         proc.kill()
                         try:
                             proc.wait(timeout=5)
                         except:
                             pass
-                        output_lines.append("(killed: stall - no output for 180s)")
+                        output_lines.append("(killed: stall)")
                         break
                 else:
                     _no_output_stall_count = 0
-    
-                # Heartbeat every 30 seconds to show system is alive
+
                 if time.time() - _god_heartbeat >= 30:
                     elapsed = int(time.time() - (deadline - GOD_TIMEOUT))
-                    print(f"[God] Still analyzing... ({elapsed}s elapsed, {int(deadline - time.time())}s until timeout)")
+                    print(f"[God] Still fixing... ({elapsed}s elapsed)")
                     _god_heartbeat = time.time()
-    
-                # Read one line with a small timeout to prevent blocking
+
                 import select
-                import sys as _sys
                 try:
-                    # Use select to check if data is available (Unix only)
                     if hasattr(select, 'select'):
                         ready, _, _ = select.select([proc.stdout], [], [], 1.0)
                         if ready:
@@ -2459,11 +2539,8 @@ def do_god_turn():
                                 output_lines.append(line)
                                 _last_output_time = time.time()
                             else:
-                                # EOF reached
                                 break
-                        # else: no data ready, continue loop
                     else:
-                        # Fallback: readline with timeout (Windows/non-Unix)
                         line = proc.stdout.readline()
                         if line:
                             line = line.rstrip('\n')
@@ -2471,12 +2548,11 @@ def do_god_turn():
                             output_lines.append(line)
                             _last_output_time = time.time()
                         else:
-                            # No data, check if process is done
                             time.sleep(0.1)
                 except Exception as read_err:
                     print(f"[God] Error reading output: {read_err}")
                     break
-    
+
             output = '\n'.join(output_lines)
             if not output.strip():
                 output = "(no output)"
@@ -2490,9 +2566,9 @@ def do_god_turn():
             traceback.print_exc(file=sys.stderr)
 
         elapsed = time.time() - t0
-        print(f"[God] Analysis complete ({elapsed:.1f}s, {len(output)} chars)")
-    
-        # 6. Check if God pushed changes
+        print(f"[God] Fix complete ({elapsed:.1f}s, {len(output)} chars)")
+
+        # Check if God pushed changes
         try:
             head_after = subprocess.run(
                 "git log --oneline -1", shell=True, cwd=GOD_WORK_DIR,
@@ -2501,29 +2577,25 @@ def do_god_turn():
             god_pushed = head_after != _god_head_before and "god:" in head_after.lower()
         except Exception:
             god_pushed = False
-    
-        # 7. Only post to chatlog if God made changes
+
+        # Only post to chatlog if God made changes
         if god_pushed:
-            # Parse [PROBLEM] and [FIX] from output
             problem_match = re.search(r'\[PROBLEM\]\s*(.+)', output)
             fix_match = re.search(r'\[FIX\]\s*(.+)', output)
-    
+
             problem_text = problem_match.group(1).strip() if problem_match else ""
             fix_text = fix_match.group(1).strip() if fix_match else ""
-    
+
             if problem_text and fix_text:
                 msg_en = f"Found issue: {problem_text}. Fixed: {fix_text}. System will restart shortly."
-                msg_zh = msg_en  # God speaks in English for now
             elif fix_text:
                 msg_en = f"Fixed: {fix_text}. System will restart shortly."
-                msg_zh = msg_en
             else:
-                # Fallback: use last non-empty lines
                 non_empty = [l for l in output_lines if l.strip()] if output_lines else []
                 fallback = non_empty[-1] if non_empty else "Applied a fix."
                 msg_en = f"{fallback} System will restart shortly."
-                msg_zh = msg_en
-    
+            msg_zh = msg_en
+
             ts_end = datetime.datetime.utcnow().strftime("%H:%M")
             entry_end = {"speaker": "God", "time": ts_end, "text": msg_en, "text_zh": msg_zh}
             history.append(entry_end)
@@ -2532,12 +2604,10 @@ def do_god_turn():
             persist_turn("God", turn_count, msg_en, msg_zh, [], workflow_state, child_state["stage"])
             print(f"[God] Posted fix: {msg_en}")
         else:
-            # No changes — silent, just log locally
-            print(f"[God] No changes needed, staying silent.")
+            print(f"[God] Claude Code ran but no changes pushed.")
     finally:
-        # Always clear the running flag, even if an exception occurred
         _god_running = False
-        _last_god_time = time.time()  # Update timestamp at the END, not start
+        _last_god_time = time.time()
 
 
 _last_god_time = 0.0  # timestamp of last God run
