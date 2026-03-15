@@ -135,6 +135,11 @@ _last_push_time = 0.0     # timestamp of last successful push
 _turns_since_last_push = 0  # turns since last push (resets on push)
 _push_count_this_task = 0  # pushes made during the CURRENT CC task (resets on new task)
 
+# Hard Reset override — FORCE_PUSH mode for breaking discussion loops
+_force_push_mode = False  # When True, bypass normal flow and force task generation
+_force_push_trigger_time = 0.0  # When FORCE_PUSH was triggered
+_force_push_skip_termination = False  # If True, skip termination (already terminated)
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -1235,6 +1240,11 @@ def enrich_task_with_context(task_desc, ctx):
     # Only dynamic state — static knowledge (architecture, rules, env vars) is in CLAUDE.md
     parts.append(f"\nCurrent stage: {child_state['stage']}")
     parts.append(f"Health: {ctx.get('health', 'unknown')}")
+    # Hardcoded fix hint for common port binding issues
+    if "port" in task_desc.lower() or "bind" in task_desc.lower() or child_state['stage'] in ("RUNTIME_ERROR", "BUILD_ERROR"):
+        parts.append(f"\nPORT BINDING FIX HINT:")
+        parts.append(f"The child process uses `uvicorn.run(app, host=\"0.0.0.0\", port=7860)`.")
+        parts.append(f"Ensure app.py reflects this exactly — app must be bound to 0.0.0.0:7860.")
     return "\n".join(parts)
 
 
@@ -2178,6 +2188,37 @@ RULES:
 - CONFIG_ERROR with collision = [ACTION: delete_env:KEY] then [ACTION: restart]
 - English first, then --- separator, then Chinese translation""")
 
+    # CHATTER DETECTION: Check if last 3 messages are pure discussion without [TASK] or code
+    # If agents are stuck in conversational loops, force them to act
+    if len(history) >= 3 and not cc_status["running"]:
+        recent_texts = [h.get("text", "") for h in history[-3:]]
+        conversational_keywords = ["let's", "maybe", "i think", "perhaps", "could we", "should we", "we could", "it might"]
+        chatter_count = 0
+        for text in recent_texts:
+            text_lower = text.lower()
+            # Check if message has [TASK], code blocks (```), or actions
+            has_substance = ("[TASK]" in text or "[ACTION:" in text or "```" in text)
+            # Check if message is mostly conversational
+            is_chatter = any(kw in text_lower for kw in conversational_keywords)
+            if is_chatter and not has_substance:
+                chatter_count += 1
+        if chatter_count >= 3:  # All 3 recent messages are chatter without substance
+            parts.append(f"\n🚨 SYSTEM: STOP DISCUSSION. EXECUTE [TASK] or PUSH.")
+            parts.append(f"Agents are stuck in conversational loop. Write ONLY [TASK]...[/TASK] this turn.")
+
+    # FORCE_PUSH MODE OVERRIDE: Hard reset for discussion loops
+    # When triggered, force agents to generate a task regardless of CC status
+    global _force_push_mode, _force_push_skip_termination
+    if _force_push_mode:
+        parts.append(f"\n🚨🚨🚨 FORCE_PUSH MODE ACTIVATED 🚨🚨🚨")
+        parts.append(f"Discussion loop detected with ZERO pushes. You MUST write a [TASK]...[/TASK] this turn.")
+        if not _force_push_skip_termination:
+            parts.append(f"FIRST: Use [ACTION: terminate_cc] to kill stuck CC.")
+            parts.append(f"THEN: Write [TASK]...[/TASK] with a concrete code fix.")
+        else:
+            parts.append(f"CC is idle. Write [TASK]...[/TASK] NOW with a concrete code fix.")
+        parts.append(f"DO NOT discuss. DO NOT plan. Write task ONLY.")
+
     return "\n".join(parts)
 
 
@@ -2587,6 +2628,32 @@ while True:
                 print(f"[CONV-RESET] Failed to post cleared chatlog: {e}")
             # Reset discussion loop counter since we're starting fresh
             _discussion_loop_count = 0
+
+    # HARD RESET OVERRIDE: Detect "all talk no action" deadlock
+    # Trigger: discussion_loop_count > 3 AND zero pushes (last_push_time == 0)
+    # This means agents have been discussing for 4+ turns with ZERO progress.
+    if not _force_push_mode and _discussion_loop_count > 3 and _last_push_time == 0:
+        print(f"[FORCE-PUSH] HARD RESET TRIGGERED: {_discussion_loop_count} discussion turns with ZERO pushes!")
+        _force_push_mode = True
+        _force_push_trigger_time = time.time()
+        # Auto-terminate CC if running (bypass 90s wait if idle > 2 min)
+        cc_idle_time = time.time() - (_last_cc_output_time if _last_cc_output_time > 0 else time.time())
+        if cc_status["running"]:
+            if cc_idle_time > 120:  # Idle > 2 minutes, skip wait
+                print(f"[FORCE-PUSH] CC idle > 2min, terminating immediately")
+                action_terminate_cc()
+                _force_push_skip_termination = True
+            else:
+                print(f"[FORCE-PUSH] CC running but active, will terminate on next agent turn")
+                _force_push_skip_termination = False
+        else:
+            _force_push_skip_termination = True  # CC already idle
+
+    # Reset FORCE_PUSH mode after 5 minutes (safety valve)
+    if _force_push_mode and time.time() - _force_push_trigger_time > 300:
+        print(f"[FORCE-PUSH] Mode timeout (300s), resetting to normal")
+        _force_push_mode = False
+        _force_push_skip_termination = False
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
