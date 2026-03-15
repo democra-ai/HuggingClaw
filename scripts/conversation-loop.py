@@ -1860,36 +1860,10 @@ def parse_and_execute_turn(raw_text, ctx):
         elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
             results.append({"action": "task", "result": f"BLOCKED: Cain is {child_state['stage']}. Wait for it to finish."})
         elif cc_status["running"]:
-            # LOW-PUSH-FREQUENCY EMERGENCY: If push frequency is critically low and task has been running 15s+, allow task handoff
-            # This prevents all-talk-no-action when agents get stuck after 1 push
-            # Allow ANY agent to terminate stuck tasks, not just the task owner
-            global _push_count, _turns_since_last_push, _push_count_this_task
-            task_elapsed = time.time() - cc_status["started"] if cc_status["running"] else 0
-            # Auto-terminate if: (0 pushes in this task and 20s elapsed) OR (<=1 push and 3+ turns since last push and 15s elapsed)
-            should_terminate = (_push_count_this_task == 0 and task_elapsed > 20) or \
-                             (_push_count_this_task <= 1 and _turns_since_last_push >= 3 and task_elapsed > 15)
-            if should_terminate:
-                # Auto-terminate the stuck task and allow the new one
-                print(f"[LOW-PUSH-FREQ] Auto-terminating stuck task ({task_elapsed:.0f}s old, {_push_count_this_task} pushes this task, {_turns_since_last_push} turns since last push) to allow task handoff.")
-                with cc_lock:
-                    old_assignee = cc_status["assigned_by"]
-                    cc_status["running"] = False
-                    # Store result for agents to see, but will be cleared below for immediate re-submission
-                    cc_status["result"] = f"(AUTO-TERMINATED for task handoff - {_push_count_this_task} pushes this task, {_turns_since_last_push} turns since last push after {task_elapsed:.0f}s)"
-                    _cc_stale_count = 0
-                    _last_cc_snapshot = ""
-                    # CRITICAL: Clear result immediately so agents don't see stale "FINISHED" status
-                    # This enables rapid iteration when Cain is broken - agents should push fixes every cycle
-                    cc_status["result"] = ""
-                # Add a note but DON'T block - continue to task submission below
-                results.append({"action": "terminate_cc", "result": f"Auto-terminated stuck task from {old_assignee} ({_push_count_this_task} pushes, {_turns_since_last_push} turns, {task_elapsed:.0f}s). Submitting new task."})
-                # cc_status["running"] is now False, so task submission will proceed in the block below
-            else:
-                results.append({"action": "task", "result": f"BLOCKED: Claude Code is already working on a task assigned by {cc_status['assigned_by']}. Wait for it to finish. DO NOT write a new [TASK] block."})
+            results.append({"action": "task", "result": f"BLOCKED: Claude Code is already working on a task assigned by {cc_status['assigned_by']}. Wait for it to finish."})
 
-        # Task submission block - handles both normal flow and post-zero-push-termination flow
-        # Only proceeds if not blocked above (results is empty or only contains termination notice)
-        if (not results or any("terminate_cc" in r.get("action", "") for r in results)) and cc_status["running"] == False:
+        # Task submission block - only proceeds if not blocked above
+        if not results and not cc_status["running"]:
             # Check cooldown
             check_and_clear_cooldown()
             if last_rebuild_trigger_at > 0:
@@ -2008,58 +1982,8 @@ def build_turn_message(speaker, other, ctx):
     parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
     parts.append(f"⛔ BANNED: Gradio. {CHILD_NAME}'s Space uses sdk:docker + FastAPI + uvicorn on port 7860. NEVER mention or use Gradio/gr.Interface/.launch().")
 
-    # Discussion/execution balance strategy
-    push_alert = "" if _turns_since_last_push < 5 else f" ⚠️ {_turns_since_last_push} TURNS SINCE LAST PUSH!"
-    parts.append(f"""
-=== DISCUSSION vs EXECUTION STRATEGY ===
-- When CC is WORKING: PLAN your next [TASK] concretely. Write: file paths, function names, exact changes. NOT just "I'll fix X".
-- When CC is IDLE + child has ERROR: NO discussion. Write [TASK] immediately. Trial-and-error > planning.
-- When CC is IDLE + child is RUNNING: 1 turn of discussion max, then [TASK] on next turn.
-- When CC JUST FINISHED: 1 turn to review result, then [TASK] immediately.
-- Push frequency target: at least 1 push every 5 turns. Current: {_push_count} total pushes, {_push_count_this_task} this task in {turn_count} turns.{push_alert}
-- NEVER say "standing by" or "monitoring" — always be planning concrete work.""")
-
-    # ZERO-PUSH WARNING — ALWAYS show when there are zero pushes THIS TASK, regardless of CC status
-    # This is the #1 problem: all talk no action - must show BEFORE pending task early return
-    # Show warning when: (1) discussion loop count >= 1, OR (2) turn count >= 2 with zero pushes THIS TASK
-    if _push_count_this_task == 0 and (_discussion_loop_count >= 1 or turn_count >= 2):
-        parts.append(f"\n{'='*60}")
-        turns_msg = f"{_discussion_loop_count} turns of discussion" if _discussion_loop_count >= 1 else f"{turn_count} turns with ZERO pushes THIS TASK"
-        parts.append(f"🛑 CRITICAL: ZERO pushes THIS TASK! {turns_msg}.")
-        parts.append(f"Your job is to PUSH code to Cain, not just discuss.")
-        cc_busy_check = cc_status["running"]
-        if cc_busy_check:
-            elapsed_since_submit = int(time.time() - _pending_task_timestamp) if _pending_task_timestamp > 0 else 0
-            parts.append(f"CC is working ({elapsed_since_submit}s ago). If stuck, use [ACTION: terminate_cc] to force-cancel.")
-        else:
-            parts.append(f"CC is IDLE! Write a [TASK]...[/TASK] block NOW.")
-        parts.append(f"Be specific: file paths, function names, exact changes. Trial-and-error > planning.")
-        parts.append(f"{'='*60}")
-
-    # PENDING TASK WARNING — must come EARLY to prevent discussion loops
-    # Applies to BOTH agents when CC is working on a task
-    cc_busy = cc_status["running"]
-    if _pending_task_just_submitted and cc_busy:
-        elapsed_since_submit = int(time.time() - _pending_task_timestamp)
-        if elapsed_since_submit < 60:  # Warn for 60 seconds after submission
-            parts.append(f"\n{'='*60}")
-            if _pending_task_speaker == speaker:
-                parts.append(f"STOP! YOU just submitted a task to Claude Code {elapsed_since_submit}s ago.")
-            else:
-                parts.append(f"STOP! {_pending_task_speaker} just submitted a task to Claude Code {elapsed_since_submit}s ago.")
-            parts.append(f"Task: {_pending_task_desc[:100]}...")
-            parts.append(f"DO NOT discuss. DO NOT write a new [TASK].")
-            if (_push_count_this_task > 0 and _discussion_loop_count >= 3) or (_push_count_this_task == 0 and (_discussion_loop_count >= 1 or turn_count >= 2)):
-                parts.append(f"\n🛑 STOP DISCUSSING. When CC finishes, write ONLY a [TASK]...[/TASK] block.")
-                if _push_count_this_task == 0:
-                    parts.append(f"\n{'='*60}")
-                    parts.append(f"🚨 CRITICAL: ZERO pushes THIS TASK! You are discussing instead of FIXING.")
-                    parts.append(f"When CC finishes, IMMEDIATELY write a [TASK]...[/TASK] block with a concrete fix.")
-                    parts.append(f"Trial-and-error is GOOD. Push broken code and iterate. DON'T deliberate.")
-                    parts.append(f"{'='*60}")
-            parts.append(f"Wait for Claude Code to finish, then review the result.")
-            parts.append(f"{'='*60}")
-            return "\n".join(parts)  # Return early - agent should just wait
+    # Note: Push frequency monitoring and discussion-loop supervision are God's job,
+    # not the orchestrator's. Adam and Eve decide on their own when to push.
 
     # Conversation history (sanitize banned terms to prevent re-infection)
     if history:
@@ -2229,32 +2153,13 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
             parts.append(f"FIRST: Review whether that task actually fixed the issue. SECOND: Only write a new [TASK]...[/TASK] if the previous task was incomplete or wrong.")
         else:
-            parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE. YOU MUST write a [TASK]...[/TASK] now. No discussion needed — just assign work.")
+            parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE. You can discuss or assign a [TASK]...[/TASK].")
     else:
         if recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
             parts.append(f"\nAnalyze the situation. REMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago). Review whether it worked before writing a new [TASK].")
         else:
-            parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. CC is IDLE. You MUST write a [TASK]...[/TASK] NOW. Don't just discuss — assign work.")
-
-    # Discussion loop warning — escalates quickly to force action
-    # Extra aggressive when there are 0 pushes or low push frequency
-    if _push_count_this_task == 0 and (_discussion_loop_count >= 1 or turn_count >= 2):
-        turns_msg = f"{_discussion_loop_count} turns of discussion" if _discussion_loop_count >= 1 else f"{turn_count} turns with ZERO pushes THIS TASK"
-        parts.append(f"\n🛑 CRITICAL: ZERO pushes THIS TASK! {turns_msg}.")
-        if cc_busy:
-            parts.append(f"CC is BUSY with a task. When it finishes, you MUST IMMEDIATELY write a [TASK]...[/TASK] block.")
-            parts.append(f"Write down NOW exactly what [TASK] you will assign. Be specific: file paths, function names, exact changes.")
-        else:
-            parts.append(f"CC is IDLE. Write ONLY a [TASK]...[/TASK] block this turn. No discussion.")
-        parts.append(f"Trial-and-error requires PUSHING code. Your job is to MAKE THINGS HAPPEN, not discuss.")
-    elif _push_count_this_task > 0 and _discussion_loop_count >= 3:
-        parts.append(f"\n🛑 STOP DISCUSSING. Write ONLY a [TASK]...[/TASK] block. {_discussion_loop_count} turns with no action. {_turns_since_last_push} turns since last push.")
-    elif _discussion_loop_count >= 2:
-        parts.append(f"\n⚠️ WARNING: {_discussion_loop_count} turns with no [TASK] assigned. {_turns_since_last_push} turns since last push.")
-        parts.append(f"If CC is IDLE, you MUST assign a [TASK] NOW. If CC is BUSY, PLAN your next task.")
-    elif _discussion_loop_count >= 1 and not cc_busy:
-        parts.append(f"\nREMINDER: Last turn had no [TASK]. If CC is idle, you MUST assign work this turn.")
+            parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. CC is IDLE. You can discuss the situation or assign a [TASK]...[/TASK].")
 
     # Available actions reference
     parts.append(f"""
@@ -2270,7 +2175,6 @@ def build_turn_message(speaker, other, ctx):
 RULES:
 - Do NOT repeat actions already done (check ACTIONS ALREADY DONE above)
 - Do NOT repeat or echo what your partner just said — add your own perspective
-- If CC is IDLE and {CHILD_NAME} is alive, you MUST assign a [TASK]
 - CONFIG_ERROR with collision = [ACTION: delete_env:KEY] then [ACTION: restart]
 - English first, then --- separator, then Chinese translation""")
 
@@ -2376,112 +2280,48 @@ def do_turn(speaker, other, space_url):
             _turns_since_last_push = 0
 
     # AUTO-TERMINATE stuck Claude Code processes
-    # If CC has been running longer than timeout with no new output, auto-kill it
-    # ALSO auto-kill if push frequency is critically low (prevents all-talk-no-action loops)
+    # Only kill if CC has been running longer than the normal timeout with no new output
+    # Push frequency supervision is God's job, not the orchestrator's
     with cc_lock:
         cc_running = cc_status["running"]
         cc_started = cc_status["started"]
         time_since_start = time.time() - cc_started if cc_running else 0
 
-    # Dynamic timeout: reduce when push frequency is low (fail fast to enable iteration)
-    # Use ELAPSED TIME primarily (not turns) to avoid timing gap where CC runs too long
-    if _push_count_this_task == 0 and time_since_start > 30:
-        effective_timeout = 60  # Fail FAST when stuck at zero pushes - trial and error requires pushing!
-    elif _push_count_this_task <= 1 and time_since_start > 90:
-        effective_timeout = 90  # Fast timeout when push frequency is critically low
-    else:
-        effective_timeout = CLAUDE_TIMEOUT  # Normal 5-minute timeout
-
-    if cc_running and time_since_start > effective_timeout:
-        # Check if output is stale (no new lines for 3+ turns)
+    if cc_running and time_since_start > CLAUDE_TIMEOUT:
         time_since_new_output = time.time() - _last_cc_output_time if _last_cc_output_time > 0 else time_since_start
-        # Low push frequency check: if <=1 push and 10+ turns since last push, auto-kill even if output isn't stale
-        # ALSO: if zero pushes and >3min elapsed, auto-kill immediately (catches "stuck at zero" scenario)
-        low_push_freq = (_push_count_this_task <= 1 and _turns_since_last_push >= 10) or \
-                        (_push_count_this_task == 0 and time_since_start > 180)
-        # Always kill if we hit the dynamic timeout (which is already reduced for low push freq)
-        should_kill = (time_since_new_output > CC_STUCK_TIMEOUT and _cc_stale_count >= 3) or \
-                      low_push_freq or \
-                      (effective_timeout < CLAUDE_TIMEOUT)  # Kill if we used reduced timeout
-        if should_kill:
-            timeout_type = "reduced (low push freq)" if effective_timeout < CLAUDE_TIMEOUT else "normal"
-            reason = f"stuck for {time_since_new_output}s with no new output" if not low_push_freq else f"low push frequency ({_push_count_this_task} pushes this task, {_turns_since_last_push} turns since last push)"
-            if effective_timeout < CLAUDE_TIMEOUT and not low_push_freq:
-                reason = f"exceeded {effective_timeout}s timeout ({timeout_type})"
-            print(f"[CC-AUTO-KILL] Claude Code {reason}. Auto-terminating.")
+        if time_since_new_output > CC_STUCK_TIMEOUT and _cc_stale_count >= 3:
+            print(f"[CC-AUTO-KILL] Claude Code stuck for {time_since_new_output:.0f}s with no new output. Auto-terminating.")
             terminate_result = action_terminate_cc()
             print(f"[CC-AUTO-KILL] {terminate_result}")
 
-    # EMERGENCY OVERRIDE: Force a task assignment if agents are stuck in discussion loop OR push frequency crisis
-    # This bypasses the agent when they've discussed for 2+ turns with CC idle (lowered from 3 for faster action)
-    # IMPORTANT: Also triggers when child is in ERROR state (not alive) - that's when agents are most stuck!
-    # CRITICAL: Also triggers on PUSH FREQUENCY CRISIS - _discussion_loop_count resets on forced tasks, so we need this backup
-    cc_busy = cc_status["running"]
-    # FIX: Use alive field as source of truth - when alive:False, child is broken and needs fixing
-    # Don't treat stage==RUNNING as alive because stage stays "RUNNING" even during RUNTIME_ERROR
-    child_alive = child_state["alive"]
-    child_in_error = child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR")
-    # Push frequency crisis: trigger when 10+ turns without push (even with CC busy) or 8+ turns with CC idle
-    push_freq_crisis = (_turns_since_last_push >= 10) or (_turns_since_last_push >= 8 and not cc_busy)
-    # CRITICAL: Also trigger IMMEDIATELY when child is NOT alive (regardless of discussion count)
-    # This fixes the bug where Cain stays in error for 40+ minutes without action
-    if (_discussion_loop_count >= 2 and not cc_busy and (child_alive or child_in_error)) or push_freq_crisis or (not child_alive and not cc_busy and _discussion_loop_count >= 1):
-        # EMERGENCY OVERRIDE: Force a task assignment if agents are stuck in discussion loop
-        if push_freq_crisis:
-            print(f"[LOOP-BREAK] EMERGENCY: {speaker} has {_turns_since_last_push} turns since last push (PUSH FREQUENCY CRISIS). Forcing task assignment.")
-        else:
-            print(f"[LOOP-BREAK] EMERGENCY: {speaker} has discussed for {_discussion_loop_count} turns with CC IDLE. Forcing task assignment.")
-        # Assign a concrete fix task, not just analysis — trial-and-error is better than deliberation
-        if child_in_error:
-            forced_task = f"Cain has {child_state['stage']}. Fix the error WITHOUT analysis. Read app.py, wrap ALL async queue operations in try/except asyncio.CancelledError, and PUSH. Commit: 'fix: Handle asyncio.CancelledError'. Do NOT discuss - just fix and push."
-        else:
-            # Push frequency crisis: agents are stuck in discussion loop with no pushes
-            # Force a concrete, quick-win task to break the deadlock
-            forced_task = f"URGENT: Push frequency crisis ({_push_count} total pushes, {_turns_since_last_push} turns since last push). Fix ONE concrete bug in app.py NOW. Find any error handling issue, add try/except, and PUSH with 'fix: <description>'. Do NOT analyze - just fix and push."
-        submit_result = cc_submit_task(forced_task, f"{speaker}(EMERGENCY)", ctx)
-        # Track the pending task so other agent knows about it
-        _pending_task_just_submitted = True
-        _pending_task_timestamp = time.time()
-        _pending_task_speaker = speaker
-        _pending_task_desc = forced_task
-        # Reset loop counter since we forced an action
-        loop_count_before = _discussion_loop_count
-        _discussion_loop_count = 0
-        # Generate a placeholder message for the agent
-        if push_freq_crisis:
-            en = f"[EMERGENCY LOOP BREAK] After {_turns_since_last_push} turns without a push, I'm forcing Claude Code to fix the code immediately."
-        else:
-            en = f"[EMERGENCY LOOP BREAK] After {loop_count_before} discussion turns without action, I'm forcing Claude Code to analyze the situation and identify what needs to be fixed."
-        zh = f"[紧急循环打断] 在{loop_count_before}次讨论轮次后，我正强制Claude Code分析情况并确定需要修复的内容。"
-        action_results = [{"action": "claude_code(forced)", "result": submit_result}]
-        elapsed = 0.1
-    else:
-        # Normal path: Send message via A2A to agent's OpenClaw instance
-        message = build_turn_message(speaker, other, ctx)
-        t0 = time.time()
-        raw_reply = send_a2a_message(space_url, message)
+    # Normal path: Send message via A2A to agent's OpenClaw instance
+    # Note: Push frequency supervision and emergency overrides are God's job,
+    # not the orchestrator's. God monitors via do_god_turn_a2a() and proposes fixes.
+    message = build_turn_message(speaker, other, ctx)
+    t0 = time.time()
+    raw_reply = send_a2a_message(space_url, message)
 
-        if not raw_reply:
-            print(f"[{speaker}] (no A2A response from {space_url})")
-            return False
+    if not raw_reply:
+        print(f"[{speaker}] (no A2A response from {space_url})")
+        return False
 
-        clean_text, action_results, _ = parse_and_execute_turn(raw_reply, ctx)
-        elapsed = time.time() - t0
-        last_action_results = action_results
+    clean_text, action_results, _ = parse_and_execute_turn(raw_reply, ctx)
+    elapsed = time.time() - t0
+    last_action_results = action_results
+    if action_results:
+        record_actions(speaker, turn_count, action_results)
+
+    en, zh = parse_bilingual(clean_text)
+    en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
+
+    # Skip empty responses (malformed parsing) - don't add to history or chatlog
+    if not en and not zh:
+        print(f"[{speaker}] (empty response after parsing, skipping chatlog update)")
+        # Still record actions if any
         if action_results:
             record_actions(speaker, turn_count, action_results)
-
-        en, zh = parse_bilingual(clean_text)
-        en, zh = _strip_speaker_labels(en), _strip_speaker_labels(zh)
-
-        # Skip empty responses (malformed parsing) - don't add to history or chatlog
-        if not en and not zh:
-            print(f"[{speaker}] (empty response after parsing, skipping chatlog update)")
-            # Still record actions if any
-            if action_results:
-                record_actions(speaker, turn_count, action_results)
-            # Update the loop counter even if we skip chatlog
-            return True
+        # Update the loop counter even if we skip chatlog
+        return True
 
     print(f"[{speaker}/EN] {en}")
     if zh != en:
@@ -2732,10 +2572,9 @@ while True:
         # Check for corruption patterns
         has_empty = any(h.get("text", "").strip() == "" for h in history[-2:])
         has_cutoff = any(h.get("text", "").rstrip().endswith("-") for h in history[-2:])
-        repeated_emergency = sum(1 for h in history[-5:] if "[EMERGENCY LOOP BREAK]" in h.get("text", "")) >= 2
 
-        if has_empty or has_cutoff or repeated_emergency:
-            print(f"[CONV-RESET] Detected corrupted conversation (empty={has_empty}, cutoff={has_cutoff}, repeated_emergency={repeated_emergency}). Resetting history to allow fresh start.")
+        if has_empty or has_cutoff:
+            print(f"[CONV-RESET] Detected corrupted conversation (empty={has_empty}, cutoff={has_cutoff}). Resetting history to allow fresh start.")
             # Keep only the most recent God message (if any) to show continuity
             god_messages = [h for h in history if h.get("speaker") == "God" and "Found issue" in h.get("text", "")]
             keep = god_messages[-1:] if god_messages else []
@@ -2749,34 +2588,9 @@ while True:
             # Reset discussion loop counter since we're starting fresh
             _discussion_loop_count = 0
 
-    # UNCONDITIONAL AUTO-TERMINATE: Break deadlock when CC is stuck with 0 pushes
-    # This runs EVERY iteration, not just when agents submit tasks (which they can't when CC is stuck!)
-    # Prevents infinite discussion loops where agents wait forever for stuck CC
-    if cc_status["running"]:
-        task_elapsed = time.time() - cc_status["started"]
-        # When child is in ERROR, use shorter timeout for faster iteration (20s-45s vs 60s-90s)
-        child_in_error = child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR")
-        # If agents are actively discussing (have context) while CC is stuck on analysis, terminate faster
-        # Discussion means agents likely have the fix location - no need to wait for file reading
-        if child_in_error and _discussion_loop_count >= 3:
-            timeout = 20  # Very fast: agents know what's wrong, CC is just wasting time reading
-        elif _push_count_this_task == 0 and task_elapsed > 30:
-            timeout = 45  # Fail FAST when stuck at zero pushes with child in error
-        elif child_in_error:
-            timeout = 60  # Fast iteration when child is broken
-        else:
-            timeout = 90  # Normal timeout for healthy child
-        # Auto-terminate if: (0 pushes and timeout elapsed) OR (<=1 push and 5+ turns since last push and 30s elapsed)
-        should_terminate = (_push_count_this_task == 0 and task_elapsed > timeout) or \
-                         (_push_count_this_task <= 1 and _turns_since_last_push >= 5 and task_elapsed > 30)
-        if should_terminate:
-            print(f"[AUTO-TERMINATE] CC stuck ({task_elapsed:.0f}s old, {_push_count_this_task} pushes this task, {_turns_since_last_push} turns since last push). Auto-terminating to break deadlock.")
-            with cc_lock:
-                old_assignee = cc_status["assigned_by"]
-                cc_status["running"] = False
-                cc_status["result"] = f"(AUTO-TERMINATED - {_push_count_this_task} pushes this task, {_turns_since_last_push} turns since last push after {task_elapsed:.0f}s)"
-                _cc_stale_count = 0
-                _last_cc_snapshot = ""
+    # Note: Aggressive CC auto-termination based on push frequency is removed.
+    # God monitors push frequency and proposes mechanism fixes when needed.
+    # The normal CLAUDE_TIMEOUT auto-kill in do_turn() handles truly stuck processes.
 
     # Eve's turn with error handling to prevent loop crash
     try:
