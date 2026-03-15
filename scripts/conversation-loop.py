@@ -2032,7 +2032,20 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"\nClaude Code JUST FINISHED with a result. Review it briefly, then write your [TASK]...[/TASK] IMMEDIATELY.")
             parts.append(f"Do NOT discuss at length. 1 turn max to review, then [TASK]. Your priority is SPEED of iteration.")
     elif child_state["alive"]:
-        if recent_task_reminder:
+        # Check cooldown even when alive - a recent push may have triggered cooldown
+        check_and_clear_cooldown()
+        cooldown_remaining = 0
+        if last_rebuild_trigger_at > 0:
+            elapsed = time.time() - last_rebuild_trigger_at
+            cooldown_remaining = max(0, REBUILD_COOLDOWN_SECS - elapsed)
+        if cooldown_remaining > 0:
+            # Cooldown active - agents should discuss, not submit tasks
+            parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. Cooldown active: {int(cooldown_remaining)}s remaining. Discuss plans but DO NOT assign [TASK] until cooldown ends.")
+            if recent_task_reminder:
+                last_completed, last_by, last_at = recent_task_reminder
+                parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
+                parts.append(f"When cooldown ends, FIRST review whether that fix worked before writing a new [TASK].")
+        elif recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
             parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE.")
             parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
