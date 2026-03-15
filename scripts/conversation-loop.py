@@ -55,7 +55,7 @@ GOD_SPACE  = "https://tao-shen-huggingclaw-god.hf.space"
 GOD_POLL_INTERVAL = 120  # God polls every 2 minutes; lightweight check first, Claude Code only when needed
 GOD_WORK_DIR = "/tmp/god-workspace"
 GOD_TIMEOUT = 300  # 5 minutes for God's Claude Code analysis (was 10min)
-HOME_SPACE_ID = "tao-shen/HuggingClaw-Home"
+GOD_SPACE_ID = "tao-shen/HuggingClaw-God"  # God improves itself (pushes to own repo)
 
 # ── A2A Health Monitoring ─────────────────────────────────────────────────────
 # Track consecutive failures and last restart time for Adam/Eve
@@ -959,9 +959,9 @@ _god_push_count = 0
 
 
 def action_claude_code_god(task):
-    """Run Claude Code to fix conversation-loop.py on the Home Space repo."""
+    """Run Claude Code to improve conversation-loop.py on God's own repo."""
     global _god_push_count
-    repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{HOME_SPACE_ID}"
+    repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{GOD_SPACE_ID}"
 
     if not _reset_workspace(GOD_WORK_DIR, repo_url):
         return "Failed to prepare God workspace."
