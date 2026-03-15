@@ -190,10 +190,15 @@ http.Server.prototype.emit = function (event, ...args) {
       return true;
     }
 
-    // /api/state → return current state
+    // /api/state → return God's remote state (God is the star/main character)
     if (pathname === '/api/state' || pathname === '/status') {
-      // Update state to idle once we're handling requests
-      if (currentState.state === 'syncing') {
+      const godState = remoteAgentStates.get('god');
+      const state = godState
+        ? { state: godState.state || 'idle', detail: godState.detail || 'God is watching',
+            progress: 100, updated_at: godState.updated_at || new Date().toISOString() }
+        : currentState;
+      // Fall back to local state while God hasn't been polled yet
+      if (!godState && currentState.state === 'syncing') {
         currentState = {
           state: 'idle', detail: `${AGENT_NAME} is running`,
           progress: 100, updated_at: new Date().toISOString()
@@ -204,10 +209,10 @@ http.Server.prototype.emit = function (event, ...args) {
         'Access-Control-Allow-Origin': '*'
       });
       res.end(JSON.stringify({
-        ...currentState,
-        bubbleText: currentBubbleText,
-        bubbleTextZh: currentBubbleTextZh,
-        officeName: `${AGENT_NAME}'s Home`
+        ...state,
+        bubbleText: (godState && godState.bubbleText) || currentBubbleText,
+        bubbleTextZh: (godState && godState.bubbleTextZh) || currentBubbleTextZh,
+        officeName: `God's Home`
       }));
       return true;
     }
@@ -272,13 +277,14 @@ http.Server.prototype.emit = function (event, ...args) {
       return true;
     }
 
-    // /agents → return remote agent list
+    // /agents → return remote agent list (exclude God — God is the star/main character)
     if (pathname === '/agents' && req.method === 'GET') {
       res.writeHead(200, {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*'
       });
-      res.end(JSON.stringify([...remoteAgentStates.values()]));
+      const agents = [...remoteAgentStates.values()].filter(a => a.agentId !== 'god');
+      res.end(JSON.stringify(agents));
       return true;
     }
 
