@@ -140,6 +140,10 @@ _force_push_mode = False  # When True, bypass normal flow and force task generat
 _force_push_trigger_time = 0.0  # When FORCE_PUSH was triggered
 _force_push_skip_termination = False  # If True, skip termination (already terminated)
 
+# Emergency Override Protocol constants
+MAX_IDLE_TURNS = 3  # Trigger emergency override after this many idle turns with zero pushes
+_emergency_override_active = False  # When True, safety throttles are ignored
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -394,11 +398,19 @@ def action_send_bubble(text):
 
 
 def action_terminate_cc():
-    """Terminate a stuck Claude Code process. Use when CC has been running with no new output for too long."""
-    global cc_status, cc_live_lines, _cc_stale_count, _last_cc_snapshot, _last_cc_output_time
+    """Terminate a stuck Claude Code process. Use when CC has been running with no new output for too long.
+    During Emergency Override, allows immediate termination if idle for > 10s."""
+    global cc_status, cc_live_lines, _cc_stale_count, _last_cc_snapshot, _last_cc_output_time, _emergency_override_active
     with cc_lock:
         if not cc_status["running"]:
             return "Claude Code is not running. Nothing to terminate."
+
+        # During Emergency Override, allow immediate termination if idle for > 10s
+        if _emergency_override_active:
+            cc_idle_time = time.time() - (_last_cc_output_time if _last_cc_output_time > 0 else time.time())
+            if cc_idle_time > 10:
+                print(f"[EMERGENCY-OVERRIDE] Terminating CC immediately (idle {int(cc_idle_time)}s > 10s threshold)")
+
         # Mark as not running - the background thread will eventually finish
         cc_status["running"] = False
         cc_status["result"] = "(TERMINATED by agent - task was stuck)"
@@ -2206,11 +2218,11 @@ RULES:
             parts.append(f"\n🚨 SYSTEM: STOP DISCUSSION. EXECUTE [TASK] or PUSH.")
             parts.append(f"Agents are stuck in conversational loop. Write ONLY [TASK]...[/TASK] this turn.")
 
-    # FORCE_PUSH MODE OVERRIDE: Hard reset for discussion loops
+    # EMERGENCY OVERRIDE PROTOCOL: PUSH_ONLY mode for breaking discussion loops
     # When triggered, force agents to generate a task regardless of CC status
-    global _force_push_mode, _force_push_skip_termination
+    global _force_push_mode, _force_push_skip_termination, _emergency_override_active
     if _force_push_mode:
-        parts.append(f"\n🚨🚨🚨 FORCE_PUSH MODE ACTIVATED 🚨🚨🚨")
+        parts.append(f"\n🚨🚨🚨 EMERGENCY OVERRIDE: PUSH_ONLY MODE 🚨🚨🚨")
         parts.append(f"Discussion loop detected with ZERO pushes. You MUST write a [TASK]...[/TASK] this turn.")
         if not _force_push_skip_termination:
             parts.append(f"FIRST: Use [ACTION: terminate_cc] to kill stuck CC.")
@@ -2218,6 +2230,7 @@ RULES:
         else:
             parts.append(f"CC is idle. Write [TASK]...[/TASK] NOW with a concrete code fix.")
         parts.append(f"DO NOT discuss. DO NOT plan. Write task ONLY.")
+        parts.append(f"SYSTEM OVERRIDE: PLANNING SUSPENDED. EXECUTE PUSH NOW.")
 
     return "\n".join(parts)
 
@@ -2629,30 +2642,32 @@ while True:
             # Reset discussion loop counter since we're starting fresh
             _discussion_loop_count = 0
 
-    # HARD RESET OVERRIDE: Detect "all talk no action" deadlock
-    # Trigger: discussion_loop_count > 3 AND zero pushes (last_push_time == 0)
-    # This means agents have been discussing for 4+ turns with ZERO progress.
-    if not _force_push_mode and _discussion_loop_count > 3 and _last_push_time == 0:
-        print(f"[FORCE-PUSH] HARD RESET TRIGGERED: {_discussion_loop_count} discussion turns with ZERO pushes!")
+    # EMERGENCY OVERRIDE PROTOCOL: Detect "all talk no action" deadlock
+    # Trigger: discussion_loop_count > MAX_IDLE_TURNS AND zero pushes (_push_count == 0)
+    # This means agents have been discussing for MAX_IDLE_TURNS+1 turns with ZERO progress.
+    if not _force_push_mode and _discussion_loop_count > MAX_IDLE_TURNS and _push_count == 0:
+        print(f"[EMERGENCY-OVERRIDE] TRIGGERED: {_discussion_loop_count} discussion turns with ZERO pushes!")
         _force_push_mode = True
+        _emergency_override_active = True
         _force_push_trigger_time = time.time()
-        # Auto-terminate CC if running (bypass 90s wait if idle > 2 min)
+        # Auto-terminate CC if running (Emergency Override: idle > 10s allows immediate termination)
         cc_idle_time = time.time() - (_last_cc_output_time if _last_cc_output_time > 0 else time.time())
         if cc_status["running"]:
-            if cc_idle_time > 120:  # Idle > 2 minutes, skip wait
-                print(f"[FORCE-PUSH] CC idle > 2min, terminating immediately")
+            if cc_idle_time > 10:  # Emergency Override: Immediate termination if idle > 10s
+                print(f"[EMERGENCY-OVERRIDE] CC idle {int(cc_idle_time)}s > 10s threshold, terminating immediately")
                 action_terminate_cc()
                 _force_push_skip_termination = True
             else:
-                print(f"[FORCE-PUSH] CC running but active, will terminate on next agent turn")
+                print(f"[EMERGENCY-OVERRIDE] CC running but active, will terminate on next agent turn")
                 _force_push_skip_termination = False
         else:
             _force_push_skip_termination = True  # CC already idle
 
     # Reset FORCE_PUSH mode after 5 minutes (safety valve)
     if _force_push_mode and time.time() - _force_push_trigger_time > 300:
-        print(f"[FORCE-PUSH] Mode timeout (300s), resetting to normal")
+        print(f"[EMERGENCY-OVERRIDE] Mode timeout (300s), resetting to normal")
         _force_push_mode = False
+        _emergency_override_active = False
         _force_push_skip_termination = False
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
