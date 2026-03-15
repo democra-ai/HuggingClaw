@@ -117,9 +117,14 @@ child_state = {
 }
 
 # Rebuild cooldown — prevent rapid pushes that keep resetting builds
-REBUILD_COOLDOWN_SECS = 360  # 6 minutes
+REBUILD_COOLDOWN_SECS = 180  # 3 minutes — fast iteration, trial-and-error is preferred
 last_rebuild_trigger_at = 0
 _pending_cooldown = False
+
+# Push frequency tracking — God uses this to detect "all talk no action"
+_push_count = 0           # total pushes since startup
+_last_push_time = 0.0     # timestamp of last successful push
+_turns_since_last_push = 0  # turns since last push (resets on push)
 
 def check_and_clear_cooldown():
     """Auto-clear cooldown if Cain has finished building."""
@@ -442,12 +447,18 @@ Your job: monitor Adam & Eve's conversation loop and fix mechanism issues.
 - Pushing triggers a Space restart — be confident the fix is correct
 - If everything looks healthy, exit quickly without changes
 
-## Common Issues to Watch For
-- Agents repeating discussion about env vars that are already configured
-- Discussion loops with no [TASK] assignment when CC is idle
-- Rate limit handling issues
-- System prompt not specific enough
-- Action history not persisting across restarts
+## Common Issues to Watch For (ordered by priority)
+1. ALL TALK NO ACTION: Agents discuss but never write [TASK] blocks → push frequency is 0 or very low
+2. Cain has RUNTIME_ERROR but agents keep discussing instead of pushing rapid trial-and-error fixes
+3. Discussion loops with no [TASK] assignment when CC is idle
+4. Agents repeating discussion about env vars that are already configured
+5. Cooldown too long — agents should push fixes rapidly when Cain is broken
+6. Turn message not aggressive enough about requiring [TASK] when CC is idle
+
+## Philosophy
+- Trial-and-error is GOOD. Agents should push frequently, fail fast, and iterate.
+- A bad push that triggers a rebuild is better than 10 turns of discussion.
+- When Cain is in error state, the priority is SPEED — push a fix attempt every cycle.
 
 ## Commit Convention
 Always use: git commit -m "god: <brief description>"
@@ -510,7 +521,7 @@ def action_claude_code(task):
     if not child_state["created"]:
         return f"{CHILD_NAME} not born yet."
 
-    global _pending_cooldown
+    global _pending_cooldown, _push_count, _last_push_time, _turns_since_last_push
     repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{CHILD_SPACE_ID}"
 
     # 1. Clone / reset to latest (preserving .claude/ memory)
@@ -580,7 +591,10 @@ def action_claude_code(task):
                           timeout=60, capture_output=True, check=True)
             push_result = f"Pushed changes:\n{status_out}"
             _pending_cooldown = True
-            print(f"[CLAUDE-CODE] Pushed: {status_out}")
+            _push_count += 1
+            _last_push_time = time.time()
+            _turns_since_last_push = 0
+            print(f"[CLAUDE-CODE] Pushed (#{_push_count}): {status_out}")
     except Exception as e:
         push_result = f"Push failed: {e}"
 
@@ -1153,6 +1167,15 @@ def build_turn_message(speaker, other, ctx):
     parts.append(f"{role_hints.get(speaker, '')} Your partner is {other}.")
     parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
 
+    # Discussion/execution balance strategy
+    parts.append(f"""
+=== DISCUSSION vs EXECUTION STRATEGY ===
+- When CC is WORKING: discuss plans, review progress, prepare next task (discussion OK)
+- When CC is IDLE + child has ERROR: NO discussion. Write [TASK] immediately. Trial-and-error > planning.
+- When CC is IDLE + child is RUNNING: 1 turn of discussion max, then [TASK] on next turn.
+- When CC JUST FINISHED: 1 turn to review result, then [TASK] immediately.
+- Push frequency target: at least 1 push every 5 turns. Current: {_push_count} pushes in {turn_count} turns.""")
+
     # Conversation history
     if history:
         parts.append("\n=== RECENT CONVERSATION ===")
@@ -1188,19 +1211,20 @@ def build_turn_message(speaker, other, ctx):
     elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
         parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. Discuss what to check next.")
     elif child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
-        parts.append(f"\n{CHILD_NAME} has {child_state['stage']}! Write a [TASK] for Claude Code to fix it.")
+        parts.append(f"\n🚨 {CHILD_NAME} has {child_state['stage']}! URGENT — write a [TASK] NOW to fix it. Trial-and-error is GOOD — push a fix attempt, don't deliberate.")
+        parts.append(f"Pushes so far: {_push_count}. Turns since last push: {_turns_since_last_push}. PUSH MORE.")
     elif child_state["alive"] and cc_status.get("result"):
-        parts.append(f"\n{CHILD_NAME} is alive. Claude Code JUST FINISHED. Review result, then write a NEW [TASK].")
+        parts.append(f"\n{CHILD_NAME} is alive. Claude Code JUST FINISHED. Review result briefly, then write a NEW [TASK] immediately.")
     elif child_state["alive"]:
-        parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE. YOU MUST write a [TASK]...[/TASK] now.")
+        parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE. YOU MUST write a [TASK]...[/TASK] now. No discussion needed — just assign work.")
     else:
         parts.append(f"\nAnalyze the situation and write a [TASK] if CC is idle.")
 
-    # Discussion loop warning
-    if _discussion_loop_count >= 4:
-        parts.append(f"\nSTOP DISCUSSING. Write ONLY a [TASK]...[/TASK] block. {_discussion_loop_count} turns with no action.")
-    elif _discussion_loop_count >= 2:
-        parts.append(f"\nWARNING: {_discussion_loop_count} turns without a task. YOU MUST write a [TASK] NOW.")
+    # Discussion loop warning — escalates quickly to force action
+    if _discussion_loop_count >= 2:
+        parts.append(f"\n🛑 STOP DISCUSSING. Write ONLY a [TASK]...[/TASK] block. {_discussion_loop_count} turns with no action. Trial-and-error > deliberation.")
+    elif _discussion_loop_count >= 1 and not cc_busy:
+        parts.append(f"\nREMINDER: Last turn had no [TASK]. If CC is idle, you MUST assign work this turn.")
 
     # Available actions reference
     parts.append(f"""
@@ -1274,8 +1298,9 @@ time.sleep(TURN_INTERVAL)
 
 def do_turn(speaker, other, space_url):
     """Execute one conversation turn (non-blocking — CC runs in background)."""
-    global last_action_results, turn_count, _current_speaker, _discussion_loop_count
+    global last_action_results, turn_count, _current_speaker, _discussion_loop_count, _turns_since_last_push
     turn_count += 1
+    _turns_since_last_push += 1
     _current_speaker = speaker
 
     # Auto-gather context (lightweight)
@@ -1289,11 +1314,14 @@ def do_turn(speaker, other, space_url):
     # This bypasses the agent when they've discussed for 5+ turns with CC idle and child alive
     cc_busy = cc_status["running"]
     child_alive = child_state["alive"] or child_state["stage"] == "RUNNING"
-    if _discussion_loop_count >= 5 and not cc_busy and child_alive:
+    if _discussion_loop_count >= 3 and not cc_busy and child_alive:
         # EMERGENCY OVERRIDE: Force a task assignment if agents are stuck in discussion loop
         print(f"[LOOP-BREAK] EMERGENCY: {speaker} has discussed for {_discussion_loop_count} turns with CC IDLE. Forcing task assignment.")
-        # Assign a generic diagnostic task automatically
-        forced_task = "Analyze the current situation: Check Cain's logs, examine the codebase, and identify what's blocking progress. List specific files to check and concrete next steps."
+        # Assign a concrete fix task, not just analysis — trial-and-error is better than deliberation
+        if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR"):
+            forced_task = f"Cain has {child_state['stage']}. Read the error logs, diagnose the root cause, fix the code, and push. Do NOT just analyze — actually fix the problem. Common issue: code using Gradio patterns (e.g. .launch()) but Space uses sdk:docker with FastAPI/uvicorn."
+        else:
+            forced_task = "Check Cain's current state. If there are errors, fix them. If Cain is healthy, add a useful feature or improvement. Push your changes — trial-and-error is preferred over deliberation."
         submit_result = cc_submit_task(forced_task, f"{speaker}(EMERGENCY)", ctx)
         # Reset loop counter since we forced an action
         loop_count_before = _discussion_loop_count
@@ -1365,12 +1393,25 @@ def _prepare_god_context():
     lines.append(f"- Discussion loop count: {_discussion_loop_count}")
     lines.append(f"- Total conversation history: {len(history)} messages")
 
-    # 2. A2A communication status
+    # 2. Push frequency — KEY METRIC for detecting "all talk no action"
+    lines.append(f"\n## Push Frequency (KEY METRIC)")
+    lines.append(f"- Total pushes since startup: {_push_count}")
+    lines.append(f"- Turns since last push: {_turns_since_last_push}")
+    if _last_push_time > 0:
+        mins_since = int((time.time() - _last_push_time) / 60)
+        lines.append(f"- Minutes since last push: {mins_since}")
+    else:
+        lines.append(f"- No pushes yet!")
+    lines.append(f"- Discussion-only turns (no [TASK]): {_discussion_loop_count}")
+    if _turns_since_last_push >= 10 or (_push_count == 0 and turn_count >= 6):
+        lines.append(f"⚠️ ALERT: Agents are ALL TALK NO ACTION — {_turns_since_last_push} turns without a push!")
+
+    # 3. A2A communication status
     lines.append(f"\n## A2A Communication")
     lines.append(f"- Adam: {ADAM_SPACE}")
     lines.append(f"- Eve: {EVE_SPACE}")
 
-    # 3. Claude Code status
+    # 4. Claude Code status
     lines.append(f"\n## Claude Code Status (for Cain tasks)")
     lines.append(cc_get_live_status())
 
@@ -1431,13 +1472,16 @@ def do_god_turn():
 {context}
 
 ## Tasks
-1. Analyze the conversation. Progress or stuck?
-2. If stuck, diagnose root cause in scripts/conversation-loop.py
-3. Fix and push if needed (commit with "god: <description>")
-4. If you made changes, end with BOTH of these lines:
+1. CHECK PUSH FREQUENCY FIRST: Look at "Push Frequency" section. If agents have gone 10+ turns or 10+ minutes without a push, that is the #1 problem.
+2. Analyze the conversation. Are agents making CONCRETE changes (pushing code) or just DISCUSSING?
+3. Common anti-pattern: agents discuss what to do, agree on a plan, but never write a [TASK] block. Fix by making the turn message more aggressive about requiring [TASK].
+4. If Cain has RUNTIME_ERROR or BUILD_ERROR, agents should be pushing fixes rapidly (trial-and-error), not deliberating.
+5. If stuck, diagnose root cause in scripts/conversation-loop.py and fix it.
+6. Commit with "god: <description>" and push.
+7. If you made changes, end with BOTH:
    [PROBLEM] <what the problem was>
    [FIX] <what you changed to fix it>
-5. If no changes needed, end with: [OK] system is healthy"""
+8. If no changes needed, end with: [OK] system is healthy"""
 
     # 4. Set up env for Claude Code — prefer real Anthropic API, fall back to z.ai
     env = os.environ.copy()

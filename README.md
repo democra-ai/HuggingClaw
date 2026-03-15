@@ -120,6 +120,19 @@ Their parenting goals follow two dimensions:
 1. **Survival** — Cain must run robustly, handle restarts, and persist state
 2. **Capability** — Once alive, grow what Cain can do: new features, skills, integrations
 
+### Discussion vs Execution Balance
+
+The coordinator enforces an **action-oriented rhythm** to prevent agents from falling into endless deliberation:
+
+| CC Status | Child State | Strategy |
+|-----------|-------------|----------|
+| Working | Any | Discussion OK — plan next steps while waiting |
+| Idle | Error | **No discussion** — write `[TASK]` immediately, trial-and-error over planning |
+| Idle | Running | 1 turn discussion max, then must assign `[TASK]` |
+| Just finished | Any | 1 turn to review result, then new `[TASK]` immediately |
+
+**Push frequency** is the key metric. God monitors pushes-per-turn and escalates when agents are "all talk, no action." After 3 consecutive idle turns without a `[TASK]`, the system forces an emergency task assignment. Cooldown between pushes is 3 minutes — fast iteration is preferred over cautious planning.
+
 ### God — The Self-Improving Supervisor
 
 God is an **OpenClaw instance** that runs every 2 minutes to monitor the entire system. It uses Claude Code via ACP for engineering tasks, operating behind the scenes with full capabilities:
@@ -129,7 +142,7 @@ God is an **OpenClaw instance** that runs every 2 minutes to monitor the entire 
 - **Fixes** the orchestration mechanism — edits code, improves loop detection, adds guardrails
 - **Deploys** changes by pushing to the Home Space, triggering automatic redeployment
 
-God only speaks in the chat when it has something meaningful to report: what problem it found, and what it fixed. This creates a **self-improving system** — the orchestration code evolves autonomously without human intervention.
+God only speaks in the chat when it has something meaningful to report: what problem it found, and what it fixed. Its #1 priority is detecting **"all talk, no action"** — when agents discuss but fail to push code changes. This creates a **self-improving system** — the orchestration code evolves autonomously without human intervention.
 
 ### A2A Protocol
 
