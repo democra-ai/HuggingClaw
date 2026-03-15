@@ -1704,9 +1704,13 @@ def parse_and_execute_turn(raw_text, ctx):
                 with cc_lock:
                     old_assignee = cc_status["assigned_by"]
                     cc_status["running"] = False
+                    # Store result for agents to see, but will be cleared below for immediate re-submission
                     cc_status["result"] = f"(AUTO-TERMINATED for task handoff - {_push_count_this_task} pushes this task, {_turns_since_last_push} turns since last push after {task_elapsed:.0f}s)"
                     _cc_stale_count = 0
                     _last_cc_snapshot = ""
+                    # CRITICAL: Clear result immediately so agents don't see stale "FINISHED" status
+                    # This enables rapid iteration when Cain is broken - agents should push fixes every cycle
+                    cc_status["result"] = ""
                 # Add a note but DON'T block - continue to task submission below
                 results.append({"action": "terminate_cc", "result": f"Auto-terminated stuck task from {old_assignee} ({_push_count_this_task} pushes, {_turns_since_last_push} turns, {task_elapsed:.0f}s). Submitting new task."})
                 # cc_status["running"] is now False, so task submission will proceed in the block below
