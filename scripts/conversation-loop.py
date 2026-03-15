@@ -1684,7 +1684,7 @@ def parse_and_execute_turn(raw_text, ctx):
                 results.append({"action": "terminate_cc", "result": f"Auto-terminated stuck task from {old_assignee} ({_push_count_this_task} pushes, {_turns_since_last_push} turns, {task_elapsed:.0f}s). Submitting new task."})
                 # cc_status["running"] is now False, so task submission will proceed in the block below
             else:
-                results.append({"action": "task", "result": f"BLOCKED: Claude Code is already working on a task assigned by {cc_status['assigned_by']}. Wait for it to finish or discuss the current task's progress."})
+                results.append({"action": "task", "result": f"BLOCKED: Claude Code is already working on a task assigned by {cc_status['assigned_by']}. Wait for it to finish. DO NOT write a new [TASK] block."})
 
         # Task submission block - handles both normal flow and post-zero-push-termination flow
         # Only proceeds if not blocked above (results is empty or only contains termination notice)
