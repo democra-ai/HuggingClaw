@@ -796,9 +796,10 @@ def main():
         print(f"[TIMER] run_openclaw launch: {time.time() - t0:.1f}s")
         print(f"[TIMER] Total startup (init → app launched): {time.time() - t_main_start:.1f}s")
 
-        # 4. Start conversation-loop on Home Space (OFFICE_MODE=1)
+        # 4. Start conversation-loop (RUN_ORCHESTRATOR=1, runs on God Space)
+        #    OFFICE_MODE=1 is for frontend serving only (Home Space)
         conv_loop_proc = None
-        if os.environ.get("OFFICE_MODE") == "1":
+        if os.environ.get("RUN_ORCHESTRATOR") == "1":
             def run_conversation_loop_forever():
                 """Launch conversation-loop with auto-restart on crash."""
                 nonlocal conv_loop_proc
@@ -834,7 +835,7 @@ def main():
             conv_thread = threading.Thread(target=run_conversation_loop_forever, daemon=True)
             conv_thread.start()
         else:
-            print("[SYNC] Not Home Space (OFFICE_MODE!=1) — skipping conversation-loop")
+            print("[SYNC] RUN_ORCHESTRATOR not set — skipping conversation-loop")
 
         # Signal handler
         def handle_signal(sig, frame):
