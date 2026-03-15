@@ -564,6 +564,60 @@ Always use: git commit -m "god: <brief description>"
     except Exception as e:
         print(f"[CLAUDE.md] Failed to write: {e}")
 
+    # Write custom slash commands (Skills) — static instructions cached by Claude Code
+    # Saves tokens: prompt only passes the dynamic task, static rules live in the skill file
+    cmd_dir = f"{workspace}/.claude/commands"
+    os.makedirs(cmd_dir, exist_ok=True)
+    try:
+        if role == "worker":
+            with open(f"{cmd_dir}/fix-cain.md", "w") as f:
+                f.write(f"""# /fix-cain — Fix or improve {CHILD_NAME}'s Space
+
+## Input
+$ARGUMENTS — The specific task to complete
+
+## Instructions
+1. Read the relevant files in the workspace (this is {CHILD_NAME}'s Space repo)
+2. Complete the task described in $ARGUMENTS
+3. Validate Python syntax before writing .py files
+4. Push changes when done: git add -A && git commit -m "Claude Code: <brief>" && git push
+
+## Rules
+- All Spaces use sdk: docker — do NOT use Gradio (no gr.Interface, no .launch())
+- Use FastAPI + uvicorn for web server, bind to port 7860
+- NEVER install torch/transformers (2GB+, causes OOM on free tier)
+- Push within 60-90 seconds — trial-and-error > deliberation
+- If unsure, pick a reasonable fix and push — see what breaks
+- Space ID: {CHILD_SPACE_ID}
+- Dataset ID: {CHILD_DATASET_ID}
+""")
+        elif role == "god":
+            with open(f"{cmd_dir}/fix-loop.md", "w") as f:
+                f.write("""# /fix-loop — Fix conversation-loop.py orchestration issues
+
+## Input
+$ARGUMENTS — The specific diagnosis/problem to fix
+
+## Instructions
+1. Read scripts/conversation-loop.py
+2. Fix the specific issue described in $ARGUMENTS
+3. Validate: python3 -c "import py_compile; py_compile.compile('scripts/conversation-loop.py', doraise=True)"
+4. Commit: git commit -m "god: <brief description>"
+5. Push: git push
+6. End output with:
+   [PROBLEM] <what the problem was>
+   [FIX] <what you changed>
+
+## Rules
+- ONLY modify scripts/conversation-loop.py
+- Only push fixes for real problems, not cosmetic changes
+- Pushing triggers a Space restart — be confident the fix is correct
+- Minimal changes — fix exactly what's broken
+- Trial-and-error is GOOD — push frequently, fail fast
+""")
+    except Exception as e:
+        print(f"[SKILLS] Failed to write commands: {e}")
+
 
 def _reset_workspace(workspace, repo_url):
     """Reset workspace to latest origin/main, preserving .claude/ and .acpx/ directories."""
@@ -715,10 +769,12 @@ def action_claude_code(task):
         "CI": "true",
     })
 
-    print(f"[ACP/CLAUDE] Running via acpx: {task[:200]}...")
+    # Use /fix-cain skill: static instructions in .claude/commands/, only task is dynamic
+    skill_prompt = f"/fix-cain {task}"
+    print(f"[ACP/CLAUDE] Running via skill: {task[:200]}...")
     try:
         proc = subprocess.Popen(
-            ["acpx", "claude", task],
+            ["acpx", "claude", skill_prompt],
             cwd=CLAUDE_WORK_DIR,
             env=env,
             stdout=subprocess.PIPE,
@@ -2424,23 +2480,8 @@ def do_god_turn():
         except Exception as e:
             print(f"[God] Warning: Could not write context file: {e}")
 
-        # Focused prompt — diagnosis already done, go straight to fixing
-        prompt = f"""## Diagnosis (from supervisor analysis)
-{diagnosis}
-
-## Current System State
-{context}
-
-## Task
-The diagnosis above identified a problem with the orchestration mechanism.
-Fix it in scripts/conversation-loop.py. Be specific and minimal.
-
-1. Read scripts/conversation-loop.py
-2. Fix the specific issue identified in the diagnosis
-3. Commit with "god: <description>" and push
-4. End with:
-   [PROBLEM] <what the problem was>
-   [FIX] <what you changed to fix it>"""
+        # Use /fix-loop skill: static instructions in .claude/commands/, only diagnosis is dynamic
+        prompt = f"/fix-loop {diagnosis}\n\nSystem state:\n{context}"
 
         # Set up env for Claude Code
         env = os.environ.copy()
