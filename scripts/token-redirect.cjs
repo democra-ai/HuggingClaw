@@ -212,7 +212,7 @@ http.Server.prototype.emit = function (event, ...args) {
         ...state,
         bubbleText: (godState && godState.bubbleText) || currentBubbleText,
         bubbleTextZh: (godState && godState.bubbleTextZh) || currentBubbleTextZh,
-        officeName: `God's Home`
+        officeName: `${AGENT_NAME}'s Home`
       }));
       return true;
     }
