@@ -2925,10 +2925,11 @@ while True:
             _discussion_loop_count = 0
 
     # EMERGENCY OVERRIDE PROTOCOL: Detect "all talk no action" deadlock
-    # Trigger: discussion_loop_count > MAX_IDLE_TURNS AND zero pushes (_push_count == 0)
+    # Trigger: discussion_loop_count > MAX_IDLE_TURNS AND no recent pushes (_turns_since_last_push >= MAX_IDLE_TURNS)
     # This means agents have been discussing for MAX_IDLE_TURNS+1 turns with ZERO progress.
-    if not _force_push_mode and _discussion_loop_count > MAX_IDLE_TURNS and _push_count == 0:
-        print(f"[EMERGENCY-OVERRIDE] TRIGGERED: {_discussion_loop_count} discussion turns with ZERO pushes!")
+    # FIXED: was using _push_count == 0 which only triggered if zero pushes EVER, breaking after first push
+    if not _force_push_mode and _discussion_loop_count > MAX_IDLE_TURNS and _turns_since_last_push >= MAX_IDLE_TURNS:
+        print(f"[EMERGENCY-OVERRIDE] TRIGGERED: {_discussion_loop_count} discussion turns, {_turns_since_last_push} turns since last push!")
         _force_push_mode = True
         _emergency_override_active = True
         _force_push_trigger_time = time.time()
