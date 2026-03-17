@@ -3290,6 +3290,12 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"\nClaude Code is WORKING. PLAN your next [TASK] — write down specific changes: file paths, function names.")
             parts.append(f"DO NOT discuss architecture or theory. PLAN concrete work only — what exact [TASK] will you assign when CC finishes?")
     elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING", "RUNNING_APP_STARTING"):
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  SUPERVISED PROCESS ISOLATION: Detect stuck boot state (alive=False during start)
+        # ══════════════════════════════════════════════════════════════════════════════
+        # If Cain is in RUNNING_APP_STARTING but alive=False, the event loop never started.
+        # This is a CRASH/HANG state, not normal boot. Agents must push rapid fixes.
+        is_stuck_boot = (child_state["stage"] == "RUNNING_APP_STARTING" and not child_state["alive"])
         # Check cooldown and inform agents
         check_and_clear_cooldown()
         cooldown_remaining = 0
@@ -3298,6 +3304,16 @@ def build_turn_message(speaker, other, ctx):
             cooldown_remaining = max(0, REBUILD_COOLDOWN_SECS - elapsed)
         if cooldown_remaining > 0:
             parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. Cooldown active: {int(cooldown_remaining)}s remaining. Discuss plans but DO NOT assign [TASK] until cooldown ends.")
+        elif is_stuck_boot:
+            # STUCK BOOT DETECTED: alive=False during RUNNING_APP_STARTING = event loop never started
+            # Treat like ERROR state — agents must push rapid trial-and-error fixes
+            parts.append(f"\n🚨 CRITICAL: {CHILD_NAME} is {child_state['stage']} but alive=False!")
+            parts.append(f"This means Cain's event loop NEVER STARTED — the process spawned but crashed during boot.")
+            parts.append(f"\n🔴 This is a CRASH/HANG state, not normal boot. Treat it like RUNTIME_ERROR.")
+            parts.append(f"- DO NOT discuss architecture or theory.")
+            parts.append(f"- Push a fix attempt EVERY cycle — trial-and-error, not deliberation.")
+            parts.append(f"- Use [ACTION: restart] if you pushed a fix and it's still stuck.")
+            parts.append(f"Pushes so far: {_push_count} total, {_push_count_this_task} this task. Turns since last push: {_turns_since_last_push}. PUSH MORE.")
         else:
             parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. No cooldown. YOU MUST write a [TASK]...[/TASK] to investigate or fix issues. Don't just discuss.")
         # Add recent task reminder during cooldown/building
