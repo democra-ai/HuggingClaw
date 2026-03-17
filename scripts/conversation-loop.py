@@ -167,6 +167,16 @@ _read_only_verification_required = False  # Set to True when verification needed
 _crash_snapshot = None  # Stores snapshot of state when crash detected
 _crash_detected_at = 0  # Timestamp when crash was detected
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SHORT-CIRCUIT VERIFICATION PROTOCOL — Eve's Analyst Override
+# ══════════════════════════════════════════════════════════════════════════════
+# Protocol: Check Eve's verification status before dispatching tasks to CC Worker
+# If Eve reports HEALTHY or CONFIRMED, BLOCK external tasks (she knows best)
+# External tasks only permitted if Eve reports UNKNOWN, CONFLICT, or INSUFFICIENT_DATA
+_eve_last_status = "UNKNOWN"  # Eve's last verification status (HEALTHY, CONFIRMED, UNKNOWN, CONFLICT, INSUFFICIENT_DATA)
+_eve_last_report_time = 0.0  # When Eve last provided a status report
+_trust_analyst_override = True  # When True, prioritize Eve's "Ground Truth" over Adam's heuristics
+
 def _handle_unknown_state_as_crash(stage_source="unknown"):
     """Handle 'unknown' or 'Unknown' state as critical CRASH with auto-rollback."""
     global _crash_snapshot, _crash_detected_at
@@ -207,6 +217,52 @@ def _init_push_count_from_workspace():
                 print(f"[PUSH-TRACK] Initialized push count from workspace: {_push_count} commits in last hour")
     except Exception as e:
         print(f"[PUSH-TRACK] Failed to initialize from workspace: {e}")
+
+def _extract_eve_verification_status(text):
+    """Extract Eve's verification status from her message text.
+
+    Eve (the analyst) provides ground-truth verification. This function parses
+    her messages to extract her status assessment.
+
+    Returns one of: HEALTHY, CONFIRMED, UNKNOWN, CONFLICT, INSUFFICIENT_DATA
+    """
+    text_upper = text.upper()
+
+    # CONFIRMED: Eve explicitly confirms something is working/fixed
+    if any(pattern in text_upper for pattern in [
+        "CONFIRMED", "VERIFIED", "WORKING", "FIXED", "RESOLVED", "SUCCESS"
+    ]):
+        # But exclude negations like "NOT CONFIRMED" or "NOT WORKING"
+        if not any(negation in text_upper for negation in [
+            "NOT CONFIRMED", "NOT VERIFIED", "NOT WORKING", "NOT FIXED",
+            "UNCONFIRMED", "UNVERIFIED"
+        ]):
+            return "CONFIRMED"
+
+    # HEALTHY: Eve reports system is healthy/normal
+    if any(pattern in text_upper for pattern in [
+        "HEALTHY", "NORMAL", "NOMINAL", "NO ISSUES", "NO PROBLEMS",
+        "LOOKS GOOD", "EVERYTHING OK", "SYSTEM HEALTHY"
+    ]):
+        return "HEALTHY"
+
+    # CONFLICT: Eve reports conflicting information
+    if any(pattern in text_upper for pattern in [
+        "CONFLICT", "DISAGREE", "MISMATCH", "INCONSISTENT",
+        "CONTRADICT", "DIFFERS FROM"
+    ]):
+        return "CONFLICT"
+
+    # INSUFFICIENT_DATA: Eve can't determine status
+    if any(pattern in text_upper for pattern in [
+        "INSUFFICIENT", "NOT ENOUGH", "UNCLEAR", "AMBIGUOUS",
+        "CANNOT DETERMINE", "UNABLE TO VERIFY", "NEED MORE"
+    ]):
+        return "INSUFFICIENT_DATA"
+
+    # Default: UNKNOWN
+    return "UNKNOWN"
+
 
 def check_and_clear_cooldown():
     """Auto-clear cooldown if Cain has finished building."""
@@ -2361,6 +2417,25 @@ def parse_and_execute_turn(raw_text, ctx):
         elif cc_status["running"]:
             results.append({"action": "task", "result": f"BLOCKED: Claude Code is already working on a task assigned by {cc_status['assigned_by']}. Wait for it to finish."})
 
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  SHORT-CIRCUIT VERIFICATION PROTOCOL: Check Eve's status before dispatching
+        # ══════════════════════════════════════════════════════════════════════════════
+        # Eve's status gates external task dispatch to Claude Code Worker.
+        # If Eve reports HEALTHY or CONFIRMED, she already verified — BLOCK redundant tasks.
+        # External tasks only permitted if Eve reports UNKNOWN, CONFLICT, or INSUFFICIENT_DATA.
+        global _eve_last_status, _trust_analyst_override
+        if not results and _trust_analyst_override and _current_speaker != "Eve":
+            # Only block non-Eve agents (Adam) from overriding Eve's assessment
+            if _eve_last_status in ("HEALTHY", "CONFIRMED"):
+                status_age = int(time.time() - _eve_last_report_time) if _eve_last_report_time > 0 else 999
+                # Block if Eve's report is recent (within 5 minutes) or very recent (within 2 turns)
+                if status_age < 300:  # 5 minutes
+                    results.append({
+                        "action": "task",
+                        "result": f"BLOCKED by Short-Circuit Verification: Eve reported {_eve_last_status} ({status_age}s ago). Her verification is the ground truth — external task dispatch not permitted. If you believe Eve's assessment is wrong, wait for her next turn to update her status."
+                    })
+                    print(f"[VERIFICATION-OVERRIDE] Blocked {_current_speaker}'s task: Eve reported {_eve_last_status}")
+
         # Task submission block - only proceeds if not blocked above
         if not results and not cc_status["running"]:
             # Check cooldown
@@ -2546,6 +2621,21 @@ def build_turn_message(speaker, other, ctx):
 
     # Claude Code live status (async)
     parts.append(f"\n=== CLAUDE CODE STATUS ===\n{cc_get_live_status()}")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  SHORT-CIRCUIT VERIFICATION PROTOCOL: Eve's Analyst Override Status
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Inform agents about Eve's verification status and the trust override flag
+    global _eve_last_status, _eve_last_report_time, _trust_analyst_override
+    status_age = int(time.time() - _eve_last_report_time) if _eve_last_report_time > 0 else 999
+    parts.append(f"\n=== VERIFICATION OVERRIDE PROTOCOL ===")
+    parts.append(f"trust_analyst_override={_trust_analyst_override}")
+    parts.append(f"Eve's last status: {_eve_last_status} ({status_age}s ago)")
+    if _trust_analyst_override and speaker != "Eve":
+        if _eve_last_status in ("HEALTHY", "CONFIRMED") and status_age < 300:
+            parts.append(f"⚠️ Eve has verified the system — external tasks will be BLOCKED unless Eve's status changes.")
+        else:
+            parts.append(f"✓ External tasks permitted — Eve's status allows verification.")
 
     # Auto-gathered context
     parts.append(f"\n=== {CHILD_NAME}'S CURRENT STATE ===")
@@ -3007,6 +3097,22 @@ def do_turn(speaker, other, space_url):
         # CC finished but result was cleared (e.g., auto-termination for handoff)
         # Clear the pending flag so agents can submit new tasks
         _pending_task_just_submitted = False
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  SHORT-CIRCUIT VERIFICATION PROTOCOL: Extract Eve's status
+    # ══════════════════════════════════════════════════════════════════════════════
+    # If this is Eve's turn, extract her verification status for use in routing logic
+    global _eve_last_status, _eve_last_report_time
+    if speaker == "Eve":
+        # Use full raw_reply for status extraction (contains all verification output)
+        new_status = _extract_eve_verification_status(raw_reply)
+        if new_status != _eve_last_status:
+            print(f"[EVE-STATUS] Status changed: {_eve_last_status} → {new_status}")
+            _eve_last_status = new_status
+            _eve_last_report_time = time.time()
+        else:
+            # Still update timestamp if Eve spoke (even with same status)
+            _eve_last_report_time = time.time()
 
     # Add to history with timestamp (text stays CLEAN for agent context)
     ts = datetime.datetime.utcnow().strftime("%H:%M")
