@@ -144,6 +144,13 @@ _force_push_skip_termination = False  # If True, skip termination (already termi
 MAX_IDLE_TURNS = 3  # Trigger emergency override after this many idle turns with zero pushes
 _emergency_override_active = False  # When True, safety throttles are ignored
 
+# Verification Override Protocol — Forces tool grounding to break speculation loops
+# When agents speculate without using verification tools, force them to inspect first
+_verification_override_mode = False  # When True, agents MUST use verification tools
+_verification_override_trigger_time = 0.0  # When VERIFICATION_OVERRIDE was triggered
+_turns_since_last_verification = 0  # Tracks turns without verification tool use
+MAX_SPECULATION_TURNS = 3  # Trigger verification override after this many speculation turns
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  STATE-SYNCHRONIZATION PROTOCOL (Worker Heartbeat)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2415,6 +2422,8 @@ def parse_and_execute_turn(raw_text, ctx):
         target = verify_match.group(1).strip() if verify_match.group(1) else "cain"
         result = action_verify_runtime(target)
         results.append({"action": f"verify_runtime:{target}", "result": result})
+        global _turns_since_last_verification
+        _turns_since_last_verification = 0  # Reset speculation counter on verification tool use
 
     # 7. Handle [ACTION: wakeup_worker] — Direct Runtime Injection Protocol
     # Immediately triggers Space restart to flush cached code.
@@ -2475,6 +2484,8 @@ def build_turn_message(speaker, other, ctx):
     """
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _discussion_loop_count
     global _worker_heartbeat_deadlock_detected, _read_only_verification_required, _file_claims
+    global _verification_override_mode, _turns_since_last_verification
+    global _force_push_mode, _force_push_skip_termination, _emergency_override_active
     parts = []
 
     # Brief role context (supplements agent's SOUL.md until it's fully configured)
@@ -2787,9 +2798,30 @@ RULES:
             parts.append(f"If analysis is repeated more than once without new logs, immediately request a system reboot or code patch.")
             parts.append(f"Use [ACTION: terminate_cc] followed by [TASK] with a concrete fix, or [ATOMIC_FIX] for direct patch.")
 
+    # VERIFICATION OVERRIDE PROTOCOL — Forces tool grounding to break speculation loops
+    # Triggered when agents speculate without using verification tools for >3 turns
+    global _verification_override_mode
+    if _verification_override_mode and not _force_push_mode:
+        parts.append(f"\n🚨🚨🚨 VERIFICATION OVERRIDE: INSPECTION MODE 🚨🚨🚨")
+        parts.append(f"System detected {_turns_since_last_verification} turns of speculation WITHOUT verification tools.")
+        parts.append(f"STOP SPECULATING. You MUST verify assumptions BEFORE proposing fixes.")
+        if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
+            parts.append(f"CURRENT STATE: {child_state['stage']} — Use verification tools to inspect ACTUAL state:")
+            if child_state["stage"] == "CONFIG_ERROR":
+                parts.append(f"1. FIRST: Use [ACTION: list_files:space] to check .env configuration")
+                parts.append(f"2. THEN: Use [ACTION: verify_runtime] to see actual error logs")
+            else:
+                parts.append(f"1. FIRST: Use [ACTION: verify_runtime] to see actual process/logs")
+                parts.append(f"2. THEN: Use [ACTION: list_files:space] to inspect file structure")
+        else:
+            parts.append(f"REQUIRED VERIFICATION STEPS:")
+            parts.append(f"1. Use [ACTION: verify_runtime] to inspect actual process state/PID/logs")
+            parts.append(f"2. Use [ACTION: list_files:space] to see file structure (.env, configs)")
+        parts.append(f"DO NOT write [TASK] until you have VERIFIED your assumptions with tools.")
+        parts.append(f"SYSTEM OVERRIDE: SPECULATION SUSPENDED. EXECUTE VERIFICATION NOW.")
+
     # EMERGENCY OVERRIDE PROTOCOL: PUSH_ONLY mode for breaking discussion loops
     # When triggered, force agents to generate a task regardless of CC status
-    global _force_push_mode, _force_push_skip_termination, _emergency_override_active
     if _force_push_mode:
         parts.append(f"\n🚨🚨🚨 EMERGENCY OVERRIDE: PUSH_ONLY MODE 🚨🚨🚨")
         parts.append(f"Discussion loop detected with ZERO pushes. You MUST write a [TASK]...[/TASK] this turn.")
@@ -2879,8 +2911,10 @@ def do_turn(speaker, other, space_url):
     """Execute one conversation turn (non-blocking — CC runs in background)."""
     global last_action_results, turn_count, _current_speaker, _discussion_loop_count, _turns_since_last_push
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc
+    global _turns_since_last_verification
     turn_count += 1
     _turns_since_last_push += 1
+    _turns_since_last_verification += 1  # Track speculation without verification
     _current_speaker = speaker
 
     # Skip agent if they have too many consecutive failures (prevents blocking the whole loop)
@@ -2901,6 +2935,7 @@ def do_turn(speaker, other, space_url):
             # Only reset counter when CC finished with at least 1 push (actual progress)
             # This prevents "all talk no action" detection from being broken by zero-push completions
             _turns_since_last_push = 0
+            _turns_since_last_verification = 0  # Also reset verification counter on actual progress
 
     # AUTO-TERMINATE stuck Claude Code processes
     # Only kill if CC has been running longer than the normal timeout with no new output
@@ -3209,6 +3244,22 @@ while True:
                 print(f"[CONV-RESET] Failed to post cleared chatlog: {e}")
             # Reset discussion loop counter since we're starting fresh
             _discussion_loop_count = 0
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  VERIFICATION OVERRIDE PROTOCOL — Forces tool grounding to break speculation loops
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Trigger: _turns_since_last_verification >= MAX_SPECULATION_TURNS (3+ turns of speculation)
+    # This is EARLIER and GENTLER than EMERGENCY_OVERRIDE — forces VERIFICATION before pushing
+    # Key difference: EMERGENCY_OVERRIDE forces pushing; VERIFICATION_OVERRIDE forces INSPECTION
+    if not _verification_override_mode and not _force_push_mode and _turns_since_last_verification >= MAX_SPECULATION_TURNS:
+        print(f"[VERIFICATION-OVERRIDE] TRIGGERED: {_turns_since_last_verification} turns without verification tools!")
+        _verification_override_mode = True
+        _verification_override_trigger_time = time.time()
+
+    # Reset VERIFICATION_OVERRIDE mode after 2 minutes (safety valve)
+    if _verification_override_mode and time.time() - _verification_override_trigger_time > 120:
+        print(f"[VERIFICATION-OVERRIDE] Mode timeout (120s), resetting to normal")
+        _verification_override_mode = False
 
     # EMERGENCY OVERRIDE PROTOCOL: Detect "all talk no action" deadlock
     # Trigger: discussion_loop_count > MAX_IDLE_TURNS AND no recent pushes (_turns_since_last_push >= MAX_IDLE_TURNS)
