@@ -572,6 +572,16 @@ _MAX_CHATTER_TURNS = 5  # Trigger after this many turns with chatter keywords
 _chatter_detection_count = 0  # Tracks consecutive turns with chatter patterns
 _last_chatter_keywords = set()  # Tracks which keywords were seen (for deduplication)
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYSTEM_CIRCUIT_BREAKER — Halts recursive analysis loops, forces state reset
+# ══════════════════════════════════════════════════════════════════════════════
+# Trigger: God issues consecutive Analysis turns (no [TASK] block)
+# Action: Force STATE_RESET, decrement permission level (stop thinking, start acting)
+_system_circuit_breaker_tripped = False  # When True, force hard reset of child state
+_system_analysis_count = 0  # Tracks consecutive analysis turns from God
+_MAX_ANALYSIS_TURNS = 2  # Trigger after this many consecutive analysis turns
+_system_circuit_breaker_trigger_time = 0.0  # When SYSTEM_CIRCUIT_BREAKER was triggered
+
 def _detect_chattering_loop():
     """Detect if agents are stuck in `.env` or port discussion loop."""
     global _chatter_detection_count, _last_chatter_keywords
@@ -4514,8 +4524,15 @@ def do_god_turn_a2a():
                     cc_submit_task_god(task)
                 elif god_cc_status["running"]:
                     print(f"[God] CC already running, skipping task")
+                # Reset analysis counter on successful task assignment
+                _system_analysis_count = 0
             else:
-                print(f"[God] Response had no [TASK] block, treating as observation")
+                # Analysis turn - no [TASK] block
+                _system_analysis_count += 1
+                print(f"[God] Response had no [TASK] block (Analysis #{_system_analysis_count}/{_MAX_ANALYSIS_TURNS})")
+                # Trigger circuit breaker if threshold exceeded
+                if _system_analysis_count >= _MAX_ANALYSIS_TURNS:
+                    _system_circuit_breaker_tripped = True
     except Exception as e:
         print(f"[God] A2A turn failed: {e}", file=sys.stderr)
         import traceback
@@ -4780,6 +4797,31 @@ while True:
     if _circuit_breaker_mode and time.time() - _circuit_breaker_trigger_time > 180:
         print(f"[CIRCUIT-BREAKER] Mode timeout (180s), resetting to normal")
         _circuit_breaker_mode = False
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  SYSTEM_CIRCUIT_BREAKER — Halts recursive analysis loops, forces state reset
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Trigger: God issues consecutive Analysis turns (no [TASK] block)
+    # Action: Force STATE_RESET, decrement permission level (stop thinking, start acting)
+    if _system_circuit_breaker_tripped:
+        print(f"[SYSTEM-CIRCUIT-BREAKER] TRIPPED: {_system_analysis_count} consecutive analysis turns!")
+        print(f"[SYSTEM-CIRCUIT-BREAKER] Circuit Breaker Tripped. Halting diagnostic loops.")
+        print(f"[SYSTEM-CIRCUIT-BREAKER] Resetting Child state to INIT for next cycle.")
+        # Force child state to INIT to break the zombie state
+        child_state["stage"] = "not_born"
+        child_state["status"] = STATUS_BOOTSTRAPPING
+        child_state["alive"] = False
+        # Clear context to break the loop
+        _context_cache.clear()
+        # Reset the circuit breaker after action
+        _system_circuit_breaker_tripped = False
+        _system_analysis_count = 0
+        _system_circuit_breaker_trigger_time = time.time()
+
+    # Reset SYSTEM_CIRCUIT_BREAKER mode after 5 minutes (safety valve)
+    if _system_circuit_breaker_trigger_time > 0 and time.time() - _system_circuit_breaker_trigger_time > 300:
+        _system_circuit_breaker_tripped = False
+        _system_analysis_count = 0
 
     # CIRCUIT BREAKER AUTO-EXECUTION: Force restart when triggered and CC idle
     # This ensures the reset happens immediately without waiting for agent turn
