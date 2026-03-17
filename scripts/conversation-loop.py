@@ -342,6 +342,7 @@ STATUS_BOOTSTRAPPING = "BOOTSTRAPPING"
 STATUS_READY = "READY"
 STATUS_CRASHED = "CRASHED"
 STATUS_DIAGNOSTIC_PAUSE = "DIAGNOSTIC_PAUSE"  # Crash Loop Backoff: pause to ingest failure data before restart
+STATUS_PROVISIONING = "PROVISIONING"  # Stop-The-World: container is dead, forcing hard reset
 
 child_state = {
     "created": False,
@@ -645,8 +646,37 @@ _logs_override_mode = False  # When True, ATOMIC_FIX is BLOCKED
 _logs_override_trigger_time = 0.0  # When LOGS_OVERRIDE was triggered
 _logs_override_container_verified = False  # Whether container status was checked
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  STOP-THE-WORLD RECOVERY MODE — Hard halt on dead worker, force infra reset
+# ══════════════════════════════════════════════════════════════════════════════
+# Trigger: Cain.alive == False (container is dead)
+# Action: Route all comms to Infrastructure Recovery, mute architectural analysis
+# Goal: Force environment reset (Kill -> Prune -> Restart), bypass conversation loop
+_stop_the_world_mode = False  # When True, ONLY infra recovery allowed
+_stop_the_world_trigger_time = 0.0  # When STOP_THE_WORLD was triggered
+_stop_the_world_initiated_reset = False  # Whether reset command was issued
 
-def _should_trigger_docker_injection():
+
+def _should_trigger_stop_the_world():
+    """Detect if Cain container is dead (alive=False) and trigger Stop-The-World protocol.
+
+    This is the "STOP THE WORLD" protocol: When the worker is dead, all
+    conversational analysis is structurally unsound. We must halt all
+    architectural discussion and force infrastructure recovery.
+
+    Triggers IMMEDIATELY when:
+    1. child_state["alive"] == False (container is dead)
+    2. Already triggered (stay in mode until alive=True)
+
+    Unlike other protocols, this is NOT time-based—it triggers immediately
+    on alive=False because "thinking about a dead worker" is structurally invalid.
+    """
+    # Trigger immediately when worker is dead
+    if not child_state["alive"]:
+        return True
+
+    # Reset mode when worker comes back alive
+    return False
     """Detect if Cain is in error state but agents keep discussing instead of pushing.
 
     This is the "ALL TALK NO ACTION" problem: Cain is broken but agents are
@@ -778,6 +808,51 @@ def _should_trigger_logs_override():
         return True
 
     return False
+
+
+def _execute_stop_the_world_recovery():
+    """Execute Stop-The-World recovery: Force infrastructure reset when worker is dead.
+
+    This bypasses ALL agent communication and directly executes infrastructure recovery.
+    The system "thinks" a dead worker is structurally unsound—we must hard-reset.
+
+    Actions:
+    1. Set child_state to "INIT" (not_born) and status to PROVISIONING
+    2. Force Docker restart (Kill -> Prune -> Restart)
+    3. Hold all agent turns until alive=True
+
+    Returns: True if recovery was initiated, False otherwise
+    """
+    global _stop_the_world_initiated_reset
+
+    # Prevent duplicate reset commands
+    if _stop_the_world_initiated_reset:
+        return False
+
+    print(f"[STOP-THE-WORLD] EXECUTING: Container is DEAD! Forcing infrastructure reset...")
+    print(f"[STOP-THE-WORLD] 1. State flush: Reset Cain to INIT, status to PROVISIONING")
+
+    # State flush: Reset to INIT and PROVISIONING
+    child_state["stage"] = "not_born"
+    child_state["status"] = STATUS_PROVISIONING
+    child_state["state"] = "INIT"
+    child_state["alive"] = False  # Will become True after restart
+
+    print(f"[STOP-THE-WORLD] 2. Bypass conversational turn - issuing SYSTEM-LEVEL reset command")
+
+    # Force restart via HuggingFace API
+    try:
+        hf_api.restart_space(CHILD_SPACE_ID)
+        print(f"[STOP-THE-WORLD] 3. Docker restart triggered (Kill -> Prune -> Restart)")
+        _stop_the_world_initiated_reset = True
+
+        # Clear context to force fresh state after recovery
+        _context_cache.clear()
+
+        return True
+    except Exception as e:
+        print(f"[STOP-THE-WORLD] CRITICAL: Reset command failed: {e}")
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5042,6 +5117,53 @@ while True:
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
     # The normal CLAUDE_TIMEOUT auto-kill in do_turn() handles truly stuck processes.
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  STOP-THE-WORLD RECOVERY MODE — Hard halt on dead worker, force infra reset
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Trigger: Cain.alive == False (container is dead)
+    # Action: Route all comms to Infrastructure Recovery, mute architectural analysis
+    # Goal: Bypass conversation loop, force environment reset, hold until alive=True
+    # Note: _stop_the_world_mode and _stop_the_world_initiated_reset are module-level globals
+
+    if not _stop_the_world_mode:
+        if _should_trigger_stop_the_world():
+            print(f"[STOP-THE-WORLD] TRIGGERED: Cain.alive={child_state['alive']} (container is DEAD)")
+            print(f"[STOP-THE-WORLD] HALTING all agent communication - ONLY infrastructure recovery allowed")
+            _stop_the_world_mode = True
+            _stop_the_world_trigger_time = time.time()
+            _stop_the_world_initiated_reset = False
+            # Clear context to prevent analysis of dead worker
+            _context_cache.clear()
+
+    # Execute recovery when triggered and CC is idle
+    if _stop_the_world_mode and not cc_status["running"]:
+        elapsed = time.time() - _stop_the_world_trigger_time
+        # Auto-execute immediately on trigger (within 5 seconds)
+        if elapsed < 5 and not _stop_the_world_initiated_reset:
+            print(f"[STOP-THE-WORLD] AUTO-EXECUTE: Bypassing conversational turn...")
+            try:
+                _execute_stop_the_world_recovery()
+            except Exception as e:
+                print(f"[STOP-THE-WORLD] Auto-execution failed: {e}")
+
+    # SKIP AGENT TURNS when Stop-The-World is active
+    # No agent may output text analysis until container reports alive=True
+    if _stop_the_world_mode:
+        # Reset mode when worker comes back alive
+        if child_state["alive"]:
+            print(f"[STOP-THE-WORLD] EXIT: Container is now alive={child_state['alive']}, resuming normal operations")
+            _stop_the_world_mode = False
+            _stop_the_world_initiated_reset = False
+            # Reset status from PROVISIONING to normal
+            if child_state["status"] == STATUS_PROVISIONING:
+                child_state["status"] = STATUS_BOOTSTRAPPING
+        else:
+            # Worker still dead - skip agent turns, wait for recovery
+            print(f"[STOP-THE-WORLD] SKIP: Worker still dead, skipping agent turns (waiting for infrastructure recovery)")
+            # Brief pause before next check
+            time.sleep(5)
+            continue  # Skip to next main loop iteration
 
     # Eve's turn with error handling to prevent loop crash
     try:
