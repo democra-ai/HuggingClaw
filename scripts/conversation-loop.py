@@ -144,6 +144,14 @@ _force_push_skip_termination = False  # If True, skip termination (already termi
 MAX_IDLE_TURNS = 3  # Trigger emergency override after this many idle turns with zero pushes
 _emergency_override_active = False  # When True, safety throttles are ignored
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  STATE-SYNCHRONIZATION PROTOCOL (Worker Heartbeat)
+# ══════════════════════════════════════════════════════════════════════════════
+# Protocol: IF Worker == IDLE AND Cain == RUNNING THEN TASK = [FORCE_WORKER_WAKE]
+# This prevents deadlock where agents discuss but CC worker never wakes up
+_worker_heartbeat_deadlock_detected = False  # Set to True when IDLE+RUNNING detected
+_read_only_verification_required = False  # Set to True when verification needed before fixes
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -1986,6 +1994,7 @@ def build_turn_message(speaker, other, ctx):
     context and turn instructions.
     """
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _discussion_loop_count
+    global _worker_heartbeat_deadlock_detected, _read_only_verification_required
     parts = []
 
     # Brief role context (supplements agent's SOUL.md until it's fully configured)
@@ -2175,7 +2184,20 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
             parts.append(f"FIRST: Review whether that task actually fixed the issue. SECOND: Only write a new [TASK]...[/TASK] if the previous task was incomplete or wrong.")
         else:
-            parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE. You can discuss or assign a [TASK]...[/TASK].")
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  WORKER HEARTBEAT PROTOCOL: Detect IDLE+RUNNING deadlock
+            # ══════════════════════════════════════════════════════════════════════════════
+            # Protocol: IF Worker == IDLE AND Cain == RUNNING THEN TASK = [FORCE_WORKER_WAKE]
+            parts.append(f"\n{CHILD_NAME} is alive (RUNNING), Claude Code is IDLE.")
+            parts.append(f"\n🚨 WORKER HEARTBEAT PROTOCOL ACTIVE 🚨")
+            parts.append(f"State mismatch detected: Child is RUNNING but Worker is IDLE.")
+            parts.append(f"You MUST assign a [TASK]...[/TASK] this turn. DO NOT just discuss.")
+            if speaker == "Eve":
+                parts.append(f"**Eve**: Trigger a diagnostic task. Use [ACTION: list_files:space] or [ACTION: check_health] first.")
+                parts.append(f"Then write [TASK] with specific file to verify and fix.")
+            else:  # Adam
+                parts.append(f"**Adam**: Execute read-only verification. Use [ACTION: list_files:space] to check current state.")
+                parts.append(f"Post the EXACT file content. Do NOT propose fixes until verified.")
     else:
         if recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
@@ -2193,6 +2215,17 @@ def build_turn_message(speaker, other, ctx):
 [ACTION: delete_env:KEY] — Delete env variable
 [ACTION: send_bubble:MESSAGE] — Message {CHILD_NAME}
 [ACTION: terminate_cc] — Kill stuck Claude Code
+[ACTION: list_files:space|dataset] — List files in Cain's repo or dataset
+[ACTION: check_health] — Check Cain's health and status
+
+CRITICAL: READ-ONLY VERIFICATION PHASE
+Before proposing ANY code fix:
+1. Use [ACTION: list_files:space] to see file structure
+2. Verify the EXACT current state matches your assumed error
+3. Only THEN write [TASK] with specific fix
+
+NO sed/write operations until file content is verified!
+This prevents correction-drift loops from stale assumptions.
 
 RULES:
 - Do NOT repeat actions already done (check ACTIONS ALREADY DONE above)
