@@ -152,6 +152,33 @@ _emergency_override_active = False  # When True, safety throttles are ignored
 _worker_heartbeat_deadlock_detected = False  # Set to True when IDLE+RUNNING detected
 _read_only_verification_required = False  # Set to True when verification needed before fixes
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  CRASH STATE HANDLING — Runtime Telemetry & State Verification
+# ══════════════════════════════════════════════════════════════════════════════
+# Protocol: Treat "Unknown" as critical CRASH state with auto-rollback/snapshot
+# This prevents agents from making assumptions about Dashboard state
+_crash_snapshot = None  # Stores snapshot of state when crash detected
+_crash_detected_at = 0  # Timestamp when crash was detected
+
+def _handle_unknown_state_as_crash(stage_source="unknown"):
+    """Handle 'unknown' or 'Unknown' state as critical CRASH with auto-rollback."""
+    global _crash_snapshot, _crash_detected_at
+    # If we detect "unknown" or "Unknown" from Dashboard/HF API, treat as CRASH
+    if stage_source.lower() == "unknown":
+        _crash_detected_at = time.time()
+        # Capture snapshot for rollback
+        _crash_snapshot = {
+            "timestamp": _crash_detected_at,
+            "child_state": dict(child_state),
+            "turn_count": turn_count,
+            "push_count": _push_count,
+        }
+        print(f"[CRASH] Unknown state detected! Treated as CRITICAL CRASH state.")
+        print(f"[CRASH] Snapshot captured for potential rollback. Timestamp: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        # Trigger emergency mode to force immediate diagnostic task
+        return True
+    return False
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -403,6 +430,80 @@ def action_send_bubble(text):
         return f"Sent message to {CHILD_NAME}: \"{text}\""
     except Exception as e:
         return f"Error: {e}"
+
+
+def action_verify_runtime(target="cain"):
+    """Verify actual runtime state by inspecting PID, logs, and live processes.
+    This is the TRUTH source - agents MUST use this before assuming Dashboard state.
+    Args:
+        target: "cain" (child) or "self" (home space)
+    Returns: Detailed runtime telemetry including PID, logs, error traces."""
+    if not child_state["created"] and target == "cain":
+        return f"{CHILD_NAME} not born yet."
+
+    target_url = CHILD_SPACE_URL if target == "cain" else HOME
+    target_name = CHILD_NAME if target == "cain" else "Home"
+
+    parts = [f"=== RUNTIME VERIFICATION: {target_name} ==="]
+    parts.append(f"Timestamp: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+    # 1. Check actual process state via /api/state
+    try:
+        resp = requests.get(f"{target_url}/api/state", timeout=5)
+        if resp.ok:
+            data = resp.json()
+            actual_state = data.get("state", "unknown")
+            actual_detail = data.get("detail", "")
+            parts.append(f"\n[PROCESS] App State: {actual_state}")
+            if actual_detail:
+                parts.append(f"[PROCESS] Detail: {actual_detail[:500]}")
+        else:
+            parts.append(f"\n[PROCESS] /api/state returned HTTP {resp.status_code}")
+    except Exception as e:
+        parts.append(f"\n[PROCESS] /api/state unreachable: {e}")
+
+    # 2. Fetch actual runtime logs (last 100 lines)
+    try:
+        log_resp = requests.get(f"{target_url}/api/logs", timeout=5)
+        if log_resp.ok:
+            log_data = log_resp.json()
+            logs = log_data.get("logs", "")
+            if logs:
+                parts.append(f"\n[LOGS] Last 100 lines from runtime:")
+                # Show last 100 lines, most recent first
+                log_lines = logs.split('\n')[-100:]
+                parts.append('\n'.join(log_lines))
+            else:
+                parts.append(f"\n[LOGS] No logs available or empty response")
+        else:
+            parts.append(f"\n[LOGS] /api/logs returned HTTP {log_resp.status_code}")
+    except Exception as e:
+        parts.append(f"\n[LOGS] Could not fetch logs: {e}")
+
+    # 3. Check HF API runtime stage as fallback
+    if target == "cain":
+        try:
+            info = hf_api.space_info(CHILD_SPACE_ID)
+            hf_stage = info.runtime.stage if info.runtime else "NO_RUNTIME"
+            parts.append(f"\n[HF-API] Runtime Stage: {hf_stage}")
+
+            # If in error state, fetch error message
+            if hf_stage in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
+                try:
+                    rresp = requests.get(
+                        f"https://huggingface.co/api/spaces/{CHILD_SPACE_ID}/runtime",
+                        headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=10)
+                    if rresp.ok:
+                        rdata = rresp.json()
+                        error_msg = rdata.get("errorMessage", "")
+                        if error_msg:
+                            parts.append(f"\n[HF-API] Error Message:\n{error_msg[:1000]}")
+                except Exception as e:
+                    parts.append(f"\n[HF-API] Could not fetch error details: {e}")
+        except Exception as e:
+            parts.append(f"\n[HF-API] Error checking space info: {e}")
+
+    return "\n".join(parts)
 
 
 def action_terminate_cc():
@@ -1239,7 +1340,57 @@ def gather_context():
     else:
         ctx.update(_context_cache[cache_key])
 
+    # 4. LOG ARTIFACTS: Inject actual runtime logs when in error state
+    # Adam needs to stop guessing and fetch actual logs from the runtime environment
+    # to ground diagnosis in reality, not hypotheses
+    if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR", "unknown", "Unknown"):
+        ctx["runtime_logs"] = _fetch_runtime_logs()
+        if ctx["runtime_logs"]:
+            ctx["has_runtime_logs"] = True
+
     return ctx
+
+
+def _fetch_runtime_logs():
+    """Fetch actual runtime logs from Cain's Space to ground diagnosis in reality.
+    Returns: Last 50 lines of runtime logs or None if unavailable."""
+    if not child_state["created"]:
+        return None
+    try:
+        # Try to fetch logs from /api/logs endpoint first
+        resp = requests.get(f"{CHILD_SPACE_URL}/api/logs", timeout=5)
+        if resp.ok:
+            data = resp.json()
+            logs = data.get("logs", "")
+            if logs:
+                # Return last 50 lines, most recent first
+                log_lines = logs.split('\n')[-50:]
+                return '\n'.join(log_lines)
+    except Exception as e:
+        print(f"[LOG-ARTIFACTS] Could not fetch logs from /api/logs: {e}")
+
+    # Fallback: Try HF API runtime error message
+    try:
+        info = hf_api.space_info(CHILD_SPACE_ID)
+        stage = info.runtime.stage if info.runtime else "unknown"
+        if stage in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
+            try:
+                rresp = requests.get(
+                    f"https://huggingface.co/api/spaces/{CHILD_SPACE_ID}/runtime",
+                    headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=10)
+                if rresp.ok:
+                    rdata = rresp.json()
+                    error_msg = rdata.get("errorMessage", "")
+                    if error_msg:
+                        # Format error message as log artifact
+                        lines = [l.strip() for l in error_msg.split('\n') if l.strip()]
+                        return "Runtime Error (from HF API):\n" + '\n'.join(lines[-20:])
+            except:
+                pass
+    except:
+        pass
+
+    return None
 
 
 def format_context(ctx):
@@ -1251,6 +1402,10 @@ def format_context(ctx):
         parts.append(f"\n=== SPACE FILES ===\n{ctx['space_files'][:2000]}")
     if ctx.get("dataset_files"):
         parts.append(f"\n=== DATASET FILES ===\n{ctx['dataset_files'][:1000]}")
+    # Inject runtime logs when available (Adam needs actual logs, not hypotheses)
+    if ctx.get("runtime_logs"):
+        parts.append(f"\n=== RUNTIME LOGS (ACTUAL LOGS — GROUND YOUR DIAGNOSIS IN REALITY) ===\n{ctx['runtime_logs'][:2000]}")
+        parts.append(f"\n🚨 ABOVE ARE ACTUAL RUNTIME LOGS. Adam: Stop guessing and diagnose from these REAL logs, not hypotheses.")
     return "\n".join(parts)
 
 
@@ -1980,6 +2135,15 @@ def parse_and_execute_turn(raw_text, ctx):
         result = action_send_bubble(bubble_match.group(1).strip())
         results.append({"action": "send_bubble", "result": result})
 
+    # 5. Handle [ACTION: verify_runtime] or [ACTION: verify_runtime:cain|self]
+    # Runtime Telemetry & State Verification Pipeline — agents MUST use this
+    # to inspect actual process state/PID/logs rather than assuming Dashboard state
+    verify_match = re.search(r'\[ACTION:\s*verify_runtime(?::([^\]]+))?\]', raw_text)
+    if verify_match:
+        target = verify_match.group(1).strip() if verify_match.group(1) else "cain"
+        result = action_verify_runtime(target)
+        results.append({"action": f"verify_runtime:{target}", "result": result})
+
     # Activate deferred cooldown
     if _pending_cooldown:
         last_rebuild_trigger_at = time.time()
@@ -2269,14 +2433,16 @@ def build_turn_message(speaker, other, ctx):
 [ACTION: terminate_cc] — Kill stuck Claude Code
 [ACTION: list_files:space|dataset] — List files in Cain's repo or dataset
 [ACTION: check_health] — Check Cain's health and status
+[ACTION: verify_runtime] — Verify actual process state/PID/logs (TRUTH source, use before assuming Dashboard state)
 
-CRITICAL: READ-ONLY VERIFICATION PHASE
+CRITICAL: RUNTIME TELEMETRY & STATE VERIFICATION
 Before proposing ANY code fix:
-1. Use [ACTION: list_files:space] to see file structure
-2. Verify the EXACT current state matches your assumed error
-3. Only THEN write [TASK] with specific fix
+1. Use [ACTION: verify_runtime] to inspect ACTUAL process state/PID/logs
+2. Use [ACTION: list_files:space] to see file structure
+3. Verify the EXACT current state matches your assumed error
+4. Only THEN write [TASK] with specific fix
 
-NO sed/write operations until file content is verified!
+NO sed/write operations until runtime state is verified!
 This prevents correction-drift loops from stale assumptions.
 
 RULES:
@@ -2673,6 +2839,14 @@ while True:
     try:
         info = hf_api.space_info(CHILD_SPACE_ID)
         new_stage = info.runtime.stage if info.runtime else "unknown"
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  CRASH STATE HANDLING: Treat "unknown" or "Unknown" as CRITICAL CRASH
+        # ══════════════════════════════════════════════════════════════════════════════
+        if _handle_unknown_state_as_crash(new_stage):
+            # Unknown state detected - trigger emergency mode
+            print(f"[CRASH] Unknown state detected at stage refresh! Treating as CRITICAL CRASH.")
+            # Force immediate context refresh to get actual logs
+            _context_cache.clear()
         if new_stage != child_state["stage"]:
             print(f"[STATUS] {child_state['stage']} → {new_stage}")
             child_state["stage"] = new_stage
