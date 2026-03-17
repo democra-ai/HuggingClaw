@@ -272,6 +272,7 @@ def get_runtime_telemetry():
 
 _last_status_fetch = 0.0
 STATUS_FETCH_INTERVAL = 15  # seconds between status fetches
+_cached_worker_status = None  # Cached worker status for health detection
 
 def get_runtime_status():
     """Fetch structured runtime status from Cain's /status endpoint.
@@ -280,7 +281,7 @@ def get_runtime_status():
     This upgrades the system from 'Observation' to 'Telemetry' — Cain self-reports
     his process state instead of Parents guessing through log inspection.
     """
-    global _last_status_fetch
+    global _last_status_fetch, _cached_worker_status
     now = time.time()
     # Cache status for STATUS_FETCH_INTERVAL seconds
     if now - _last_status_fetch < STATUS_FETCH_INTERVAL:
@@ -297,6 +298,8 @@ def get_runtime_status():
             data = resp.json()
             pid = data.get("pid")
             worker = data.get("active") or data.get("worker")  # Handle both field names
+            # Cache worker status for health detection (Control Plane vs Data Plane)
+            _cached_worker_status = worker
             # Create structured system report for context injection
             report = f"[SYSTEM REPORT: pid={pid}, worker={worker}]"
             event_bus.publish("RUNTIME_STATUS", {
@@ -3892,7 +3895,19 @@ while True:
             old_stage = child_state["stage"]
             print(f"[STATUS] {child_state['stage']} → {new_stage}")
             child_state["stage"] = new_stage
-            child_state["alive"] = (new_stage == "RUNNING")
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  SUPERVISED PROCESS ISOLATION: Check Control Plane AND Data Plane
+            # ══════════════════════════════════════════════════════════════════════════════
+            # HF stage == "RUNNING" means Control Plane (App) is responsive
+            # But we must also verify Data Plane (Worker) is actually alive
+            # If worker is dead, alive=False even if stage==RUNNING (prevents zombie state)
+            stage_alive = (new_stage == "RUNNING")
+            worker_alive = _cached_worker_status is True
+            if stage_alive and not worker_alive:
+                print(f"[HEALTH] Control Plane OK but Data Plane DEAD — zombie state detected!")
+                child_state["alive"] = False
+            else:
+                child_state["alive"] = stage_alive
             _context_cache.clear()
             # Publish CHILD_STAGE_CHANGED event for real-time status
             publish_child_stage_changed(old_stage, new_stage, child_state["alive"])
