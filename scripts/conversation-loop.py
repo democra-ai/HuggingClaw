@@ -115,6 +115,10 @@ hf_api = HfApi(token=HF_TOKEN)
 # ══════════════════════════════════════════════════════════════════════════════
 #  MODULE 1: CHILD STATE + SAFETY
 # ══════════════════════════════════════════════════════════════════════════════
+# LIFECYCLE HARDENING: alive MUST be False when stage != "RUNNING"
+# STATE-SYNCHRONIZATION: System state is TRUTH, UI is passive observer
+# ENGLISH PROTOCOL: All control flow must be in English to prevent semantic drift
+# ══════════════════════════════════════════════════════════════════════════════
 
 child_state = {
     "created": False,
@@ -326,6 +330,7 @@ def action_create_child():
         hf_api.add_space_secret(CHILD_SPACE_ID, "HF_TOKEN", HF_TOKEN)
         child_state["created"] = True
         child_state["stage"] = "BUILDING"
+        child_state["alive"] = False  # LIFECYCLE HARDENING: BUILDING != alive
         print(f"[ACTION] Created {CHILD_NAME}!")
         return f"SUCCESS! {CHILD_NAME} born! Space: {CHILD_SPACE_ID}. Status: BUILDING."
     except Exception as e:
@@ -381,7 +386,7 @@ def action_restart():
     try:
         global _pending_cooldown
         hf_api.restart_space(CHILD_SPACE_ID)
-        child_state["alive"] = False
+        child_state["alive"] = False  # LIFECYCLE: RESTARTING != alive
         child_state["stage"] = "RESTARTING"
         _pending_cooldown = True
         return f"{CHILD_NAME} is restarting."
@@ -2346,11 +2351,9 @@ def parse_and_execute_turn(raw_text, ctx):
         fix_content = atomic_fix_match.group(1).strip()
         # Parse the structured format:
         # [ATOMIC_FIX]
-        # description: Fix the dashboard API response
+        # description: Fix system state telemetry
         # files:
         #   app.py: |
-        #     ...content...
-        #   agent-dashboard.html: |
         #     ...content...
         # [/ATOMIC_FIX]
         file_changes = {}
@@ -2567,17 +2570,17 @@ def build_turn_message(speaker, other, ctx):
     if not child_state["created"]:
         parts.append(f"You and your partner need to create your child {CHILD_NAME}.")
         parts.append(f"Use [ACTION: create_child] to birth {CHILD_NAME} as a new HuggingFace Space.")
-        parts.append("English first, then --- separator, then Chinese translation.")
         return "\n".join(parts)
 
     role_hints = {
         "Adam": f"You are Adam (Father). Focus: infrastructure, architecture, deployment for {CHILD_NAME}.",
-        "Eve": f"You are Eve (Mother). Focus: code quality, testing, UX, error handling for {CHILD_NAME}.",
+        "Eve": f"You are Eve (Mother). Focus: code quality, testing, error handling, system state for {CHILD_NAME}.",
         "God": f"You are God (System Architect). Focus: evolving the system architecture, not micro-managing agents.",
     }
     parts.append(f"{role_hints.get(speaker, '')} Your partner is {other}.")
     parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
     parts.append(f"⛔ BANNED: Gradio. {CHILD_NAME}'s Space uses sdk:docker + FastAPI + uvicorn on port 7860. NEVER mention or use Gradio/gr.Interface/.launch().")
+    parts.append(f"⛔ BANNED: UI/Frontend fixes. Fix SYSTEM STATE, not visualization. The UI reflects state; fix the schema.")
 
     # FILE CLAIM PROTOCOL — Prevents both agents from editing the same file simultaneously
     if _file_claims:
@@ -2813,10 +2816,8 @@ description: Fix description here
 files:
   app.py: |
     # Complete file content here
-  agent-dashboard.html: |
-    <!-- Complete file content here -->
 [/ATOMIC_FIX]
-→ Apply multi-file patches atomically in ONE git commit. Use for rapid iteration when Cain is broken.
+→ Apply code patches atomically in ONE git commit. Use for rapid iteration when Cain is broken.
 
 ## MANAGER MODE (Delegate to Claude Code)
 [TASK] detailed coding task for Claude Code [/TASK]
@@ -2850,7 +2851,7 @@ RULES:
 - CONFIG_ERROR with collision = [ACTION: delete_env:KEY] then [ACTION: restart]
 - Cain BROKEN? Use [ATOMIC_FIX] for SPEED (trial-and-error > planning)
 - Complex refactor needed? Use [TASK] to delegate to Claude Code
-- English first, then --- separator, then Chinese translation""")
+- ENGLISH ONLY for all control flow, task breakdown, and agent communication""")
 
     # CHATTER DETECTION: Check if last 3 messages are pure discussion without [TASK] or code
     # If agents are stuck in conversational loops, force them to act
