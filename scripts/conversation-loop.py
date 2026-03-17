@@ -656,25 +656,19 @@ def action_atomic_fix(file_changes, description):
         return f"Atomic fix failed: {e}"
 
 
-# ── Direct Runtime Injection Protocol ───────────────────────────────────────────
-# BREAKS the passive polling deadlock by providing immediate worker wakeup.
-# When the worker enters IDLE state but new work is available, this protocol
-# injects a runtime signal to bypass file-watcher delays and force immediate
-# task processing. This turns the system into a reactive architecture.
-
-RUNTIME_TRIGGER_FILE = "/tmp/cc-wakeup-trigger"
-_runtime_trigger_enabled = True  # Master switch for the protocol
+# ══════════════════════════════════════════════════════════════════════════════
+#  SPACE RESTART PROTOCOL — Code changes don't propagate to running containers
+# ══════════════════════════════════════════════════════════════════════════════
+# CRITICAL: Runtime triggers don't work because containers run cached code.
+# The ONLY way to apply code changes is to restart the entire Space via HF API.
+_runtime_trigger_enabled = False  # DISABLED — use Space restart instead
 
 
 def action_wakeup_worker():
-    """Immediately trigger worker wakeup by injecting a runtime signal.
+    """Force Space restart to flush cached code and apply changes.
 
-    This action creates a trigger file that the worker actively monitors,
-    bypassing any passive polling delays. The worker transitions from
-    IDLE to PROCESSING immediately upon detecting the trigger.
-
-    This is the DIRECT RUNTIME INJECTION protocol — a reactive mechanism
-    that eliminates the deadlock where workers wait for file changes.
+    CRITICAL: Code changes do NOT propagate to a running container.
+    The only way to fix IDLE worker state is to restart the Space via HF API.
     """
     if not child_state["created"]:
         return f"{CHILD_NAME} not born yet."
@@ -682,46 +676,30 @@ def action_wakeup_worker():
     if cc_status["running"]:
         return f"BLOCKED: Claude Code is already running. Worker is active."
 
-    # Create the trigger file - this is the "injection" point
+    # TRIGGER SPACE RESTART — this flushes the cached code
     try:
-        with open(RUNTIME_TRIGGER_FILE, 'w') as f:
-            f.write(f"wakeup_at={time.time()}\n")
-            f.write(f"triggered_by=direct_runtime_injection\n")
-        print(f"[RUNTIME-INJECTION] Wakeup trigger created at {RUNTIME_TRIGGER_FILE}")
+        print(f"[SPACE-RESTART] Triggering Space restart to flush cached code...")
+        hf_api.restart_space(CHILD_SPACE_ID)
+        print(f"[SPACE-RESTART] Restart signal sent to {CHILD_SPACE_ID}")
 
         # Force immediate state transition check
         global _worker_heartbeat_deadlock_detected
         if child_state["alive"] and not cc_status["running"]:
             _worker_heartbeat_deadlock_detected = True
-            print(f"[RUNTIME-INJECTION] Worker heartbeat deadlock FLAGGED")
+            print(f"[SPACE-RESTART] Worker heartbeat deadlock FLAGGED")
     except Exception as e:
-        return f"Failed to create wakeup trigger: {e}"
+        return f"Failed to restart Space: {e}"
 
-    return f"✅ RUNTIME INJECTION: Worker wakeup signal sent. Trigger file created at {RUNTIME_TRIGGER_FILE}"
+    return f"✅ SPACE RESTART: {CHILD_NAME} is restarting. Code changes will apply when Space returns to RUNNING state."
 
 
 def _check_runtime_trigger():
-    """Check for runtime trigger and immediately process pending work.
+    """DISABLED — Runtime triggers don't work with container caching.
 
-    This is the reactive side of the Direct Runtime Injection Protocol.
-    Called during each turn to actively check for wakeup signals instead
-    of relying on passive file watching.
+    The previous approach of writing trigger files doesn't work because
+    containers run cached code. Use Space restart instead.
     """
-    if not _runtime_trigger_enabled:
-        return
-
-    if os.path.exists(RUNTIME_TRIGGER_FILE):
-        try:
-            # Read trigger metadata
-            with open(RUNTIME_TRIGGER_FILE, 'r') as f:
-                content = f.read()
-            # Remove trigger after processing (single-shot)
-            os.remove(RUNTIME_TRIGGER_FILE)
-            print(f"[RUNTIME-INJECTION] Trigger detected and processed: {content.strip()}")
-            # Force worker heartbeat check
-            return True
-        except Exception as e:
-            print(f"[RUNTIME-INJECTION] Error reading trigger: {e}")
+    # NO-OP: Runtime injection protocol disabled
     return False
 
 
@@ -2439,8 +2417,8 @@ def parse_and_execute_turn(raw_text, ctx):
         results.append({"action": f"verify_runtime:{target}", "result": result})
 
     # 7. Handle [ACTION: wakeup_worker] — Direct Runtime Injection Protocol
-    # Immediately triggers worker wakeup by injecting a runtime signal.
-    # This bypasses passive polling delays and forces immediate task processing.
+    # Immediately triggers Space restart to flush cached code.
+    # This is required because code changes don't propagate to running containers.
     if re.search(r'\[ACTION:\s*wakeup_worker\]', raw_text):
         result = action_wakeup_worker()
         results.append({"action": "wakeup_worker", "result": result})
@@ -2750,7 +2728,7 @@ files:
 [ACTION: delete_env:KEY] — Delete env variable
 [ACTION: send_bubble:MESSAGE] — Message {CHILD_NAME}
 [ACTION: terminate_cc] — Kill stuck Claude Code
-[ACTION: wakeup_worker] — Force immediate worker wakeup (Direct Runtime Injection)
+[ACTION: wakeup_worker] — Force Space restart to flush cached code (only way to apply changes)
 [ACTION: list_files:space|dataset] — List files in Cain's repo or dataset
 [ACTION: check_health] — Check Cain's health and status
 [ACTION: verify_runtime] — Verify actual process state/PID/logs (TRUTH source)
@@ -3177,13 +3155,10 @@ while True:
 
     # DIRECT RUNTIME INJECTION PROTOCOL: Check for wakeup trigger each iteration
     # This provides immediate responsiveness when agents inject a runtime signal,
-    # bypassing passive file-watcher delays. The system becomes reactive instead
-    # of polling-based.
+    # Runtime trigger check DISABLED — code changes require Space restart via HF API
     if _check_runtime_trigger():
-        print(f"[RUNTIME-INJECTION] Wakeup signal detected, forcing worker heartbeat check")
-        # Flag the worker heartbeat deadlock to force immediate task assignment
-        if child_state["alive"] and not cc_status["running"]:
-            _worker_heartbeat_deadlock_detected = True
+        # This block is now a NO-OP since _check_runtime_trigger() always returns False
+        pass
 
     # Refresh Cain's stage periodically
     try:
