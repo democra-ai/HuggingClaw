@@ -1858,6 +1858,11 @@ _pending_task_timestamp = 0.0  # when was the task submitted?
 _pending_task_speaker = ""  # who submitted it?
 _pending_task_desc = ""  # what was the task?
 
+# File claim protocol — prevents agents from racing on same target (contention resolution thrashing)
+# Agents must CLAIM a file before assigning TASK. Claims expire after 2 turns (approx 4 minutes).
+_file_claims = {}  # filename -> (speaker, claim_turn, claim_time)
+_claim_turn_counter = 0  # increments each turn, used to expire stale claims
+
 
 def parse_and_execute_turn(raw_text, ctx):
     """Parse LLM output. Route [TASK] to Claude Code, handle few escape-hatch actions."""
@@ -1879,6 +1884,36 @@ def parse_and_execute_turn(raw_text, ctx):
     if re.search(r'\[ACTION:\s*terminate_cc\]', raw_text):
         result = action_terminate_cc()
         results.append({"action": "terminate_cc", "result": result})
+
+    # 1c. Handle [CLAIM: filename] — File claim protocol (prevents contention thrashing)
+    # Agents must claim a file before assigning a TASK to it. Claims expire after 2 turns.
+    global _file_claims, _claim_turn_counter
+    claim_match = re.search(r'\[CLAIM:\s*([^\]]+)\]', raw_text)
+    if claim_match:
+        claimed_file = claim_match.group(1).strip()
+        claim_time = time.time()
+        _claim_turn_counter += 1
+        # Expire old claims (older than 2 turns or 4 minutes)
+        _file_claims = {f: (s, t, ct) for f, (s, t, ct) in _file_claims.items()
+                       if _claim_turn_counter - t < 2 and claim_time - ct < 240}
+        # Check if file already claimed by OTHER agent
+        if claimed_file in _file_claims:
+            existing_owner, existing_turn, _ = _file_claims[claimed_file]
+            if existing_owner != _current_speaker:
+                results.append({"action": "claim", "result": f"BLOCKED: {claimed_file} already claimed by {existing_owner} (turn #{existing_turn}). Use [STANDBY: reason] to yield or [CLAIM: different_file]."})
+            else:
+                results.append({"action": "claim", "result": f"Renewed claim on {claimed_file}."})
+        else:
+            _file_claims[claimed_file] = (_current_speaker, _claim_turn_counter, claim_time)
+            results.append({"action": "claim", "result": f"Claimed {claimed_file}."})
+            print(f"[CLAIM] {_current_speaker} claimed '{claimed_file}' (turn #{_claim_turn_counter})")
+
+    # 1d. Handle [STANDBY: reason] — Explicit yield when respecting another agent's claim
+    standby_match = re.search(r'\[STANDBY:\s*([^\]]+)\]', raw_text)
+    if standby_match:
+        reason = standby_match.group(1).strip()
+        results.append({"action": "standby", "result": f"Standing by: {reason}"})
+        print(f"[STANDBY] {_current_speaker} standing by: {reason}")
 
     # 2. Handle [TASK]...[/TASK] → Claude Code
     task_match = re.search(r'\[TASK\](.*?)\[/TASK\]', raw_text, re.DOTALL)
@@ -1974,6 +2009,8 @@ def parse_and_execute_turn(raw_text, ctx):
     # Clean text for display (memory is handled by each agent's OpenClaw)
     clean = re.sub(r'\[TASK\].*?\[/TASK\]', '', raw_text, flags=re.DOTALL)
     clean = re.sub(r'\[ACTION:[^\]]*\]', '', clean)
+    clean = re.sub(r'\[CLAIM:[^\]]*\]', '', clean)
+    clean = re.sub(r'\[STANDBY:[^\]]*\]', '', clean)
     clean = re.sub(r'\[MEMORY:[^\]]*\]', '', clean).strip()
 
     return clean, results, task_assigned
@@ -1994,7 +2031,7 @@ def build_turn_message(speaker, other, ctx):
     context and turn instructions.
     """
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _discussion_loop_count
-    global _worker_heartbeat_deadlock_detected, _read_only_verification_required
+    global _worker_heartbeat_deadlock_detected, _read_only_verification_required, _file_claims
     parts = []
 
     # Brief role context (supplements agent's SOUL.md until it's fully configured)
@@ -2012,6 +2049,21 @@ def build_turn_message(speaker, other, ctx):
     parts.append(f"{role_hints.get(speaker, '')} Your partner is {other}.")
     parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
     parts.append(f"⛔ BANNED: Gradio. {CHILD_NAME}'s Space uses sdk:docker + FastAPI + uvicorn on port 7860. NEVER mention or use Gradio/gr.Interface/.launch().")
+
+    # FILE CLAIM PROTOCOL — Prevents both agents from editing the same file simultaneously
+    if _file_claims:
+        # Expire stale claims before displaying
+        current_time = time.time()
+        _file_claims = {f: (s, t, ct) for f, (s, t, ct) in _file_claims.items()
+                       if current_time - ct < 240}
+        if _file_claims:
+            parts.append(f"\n=== FILE CLAIMS ===")
+            for f, (owner, turn_num, _) in _file_claims.items():
+                if owner != speaker:
+                    parts.append(f"  {f} claimed by {owner} (turn #{turn_num}) — [STANDBY: reason] to yield or [CLAIM: different_file]")
+                else:
+                    parts.append(f"  {f} claimed by YOU — proceed with [TASK]")
+    parts.append(f"\nCLAIM PROTOCOL: Before assigning a [TASK] to a file, use [CLAIM: filename]. If already claimed, use [STANDBY: reason] or [CLAIM: different_file].")
 
     # Note: Push frequency monitoring and discussion-loop supervision are God's job,
     # not the orchestrator's. Adam and Eve decide on their own when to push.
