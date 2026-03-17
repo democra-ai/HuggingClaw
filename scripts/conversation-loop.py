@@ -427,6 +427,115 @@ def _detect_chattering_loop():
     return _chatter_detection_count >= _MAX_CHATTER_TURNS
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  DOCKER LOG INJECTION PROTOCOL — Bypass conversation, force binary data retrieval
+# ══════════════════════════════════════════════════════════════════════════════
+# Trigger: Cain is in error state AND agents are discussing without pushing
+# Action: HALT conversational loop, FORCE direct Docker log inspection, INJECT into context
+# Goal: Move from "semantic deliberation" to "binary data retrieval"
+_docker_injection_mode = False  # When True, bypass Adam/Eve and inject Docker task
+_docker_injection_trigger_time = 0.0  # When DOCKER_INJECTION was triggered
+_docker_injection_result = None  # Cached Docker logs to inject into context
+_last_docker_injection_turn = 0  # Track last turn we injected (prevent spam)
+
+
+def _should_trigger_docker_injection():
+    """Detect if Cain is in error state but agents keep discussing instead of pushing.
+
+    This is the "ALL TALK NO ACTION" problem: Cain is broken but agents are
+    deliberating instead of pushing trial-and-error fixes.
+
+    Triggers when:
+    1. Cain is in RUNTIME_ERROR, BUILD_ERROR, CONFIG_ERROR, or CRASHED state
+    2. Agents have had >= 2 turns since last push (they're discussing, not acting)
+    3. Claude Code is IDLE (not working on a task)
+    """
+    global _turns_since_last_push
+
+    # Check if Cain is in error/crash state
+    is_error_state = (
+        child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR") or
+        child_state["status"] == STATUS_CRASHED
+    )
+
+    # Must have Cain created
+    if not child_state["created"] or not is_error_state:
+        return False
+
+    # Claude Code must be idle (don't interrupt active work)
+    with cc_lock:
+        if cc_status["running"]:
+            return False
+
+    # Agents have discussed without pushing
+    if _turns_since_last_push < 2:
+        return False
+
+    # Check cooldown - don't trigger if build is still in progress
+    check_and_clear_cooldown()
+    if last_rebuild_trigger_at > 0:
+        elapsed = time.time() - last_rebuild_trigger_at
+        if elapsed < REBUILD_COOLDOWN_SECS:
+            return False  # Build still running
+
+    return True
+
+
+def _execute_docker_injection():
+    """Execute direct Docker log inspection and inject results into context.
+
+    This bypasses Adam/Eve entirely and directly assigns a task to the
+    Claude Code Worker to fetch Docker logs. The results are cached
+    and injected into the next context build.
+
+    Returns: True if injection was executed, False otherwise
+    """
+    global _docker_injection_result, _last_docker_injection_turn
+
+    # Prevent spam: only inject once per 5 turns
+    current_turn = turn_count
+    if current_turn - _last_docker_injection_turn < 5:
+        return False
+
+    print(f"[DOCKER-INJECTION] EXECUTING: Bypassing conversation, forcing Docker log inspection...")
+
+    # Gather context for the task
+    ctx = gather_context()
+
+    # Direct task: Fetch Docker logs to identify the crash
+    # This is NOT a normal agent task - it's system surgery
+    docker_task = """[DOCKER LOG INJECTION — SYSTEM SURGERY]
+
+Cain is in ERROR state. Bypass conversational diagnosis and fetch BINARY crash data:
+
+1. Read the runtime logs from the /api/logs endpoint
+2. Extract the LAST 100 lines of actual crash data (not the summary)
+3. Identify the FIRST error message or stack trace
+4. Report EXACTLY what the error is - do NOT hypothesize
+
+Use this EXACT approach:
+- Bash: curl -s {CHILD_SPACE_URL}/api/logs | tail -100
+- Read the FULL output, not truncated
+- Find the line starting with "Error:", "Traceback", "Exception", etc.
+
+DO NOT:
+- Discuss architecture
+- Propose solutions before reading the crash
+- Guess what the error might be
+
+REPORT:
+- The EXACT error message (copy-paste from logs)
+- The line number where it occurred
+- The full stack trace if available
+""".replace("{CHILD_SPACE_URL}", CHILD_SPACE_URL)
+
+    # Submit task directly to CC Worker
+    result = cc_submit_task(docker_task, "DOCKER_INJECTION", ctx)
+    print(f"[DOCKER-INJECTION] Task submitted: {result}")
+
+    _last_docker_injection_turn = current_turn
+    return True
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  LIVENESS & READINESS — /healthz Polling for Split-Brain Prevention
 # ══════════════════════════════════════════════════════════════════════════════
 # Polls /healthz endpoint to verify application event loop is actually running.
@@ -4227,6 +4336,39 @@ while True:
                 _chatter_detection_count = 0
             except Exception as e:
                 print(f"[CIRCUIT-BREAKER] Auto-execution failed: {e}")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  DOCKER LOG INJECTION PROTOCOL — Break conversational loops, force data retrieval
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Detect when Cain is in error state but agents keep discussing instead of pushing
+    # This bypasses Adam/Eve and directly injects a Docker log inspection task
+    if not _docker_injection_mode:
+        if _should_trigger_docker_injection():
+            print(f"[DOCKER-INJECTION] TRIGGERED: Cain in error state, {_turns_since_last_push} turns since last push!")
+            _docker_injection_mode = True
+            _docker_injection_trigger_time = time.time()
+            # Clear context to break the semantic loop
+            _context_cache.clear()
+
+    # Reset DOCKER_INJECTION mode after 2 minutes (safety valve)
+    if _docker_injection_mode and time.time() - _docker_injection_trigger_time > 120:
+        print(f"[DOCKER-INJECTION] Mode timeout (120s), resetting to normal")
+        _docker_injection_mode = False
+
+    # DOCKER INJECTION AUTO-EXECUTION: Force Docker log inspection when triggered
+    # This bypasses Adam/Eve entirely and directly assigns a task to Claude Code
+    if _docker_injection_mode and not cc_status["running"] and child_state["created"]:
+        elapsed = time.time() - _docker_injection_trigger_time
+        # Auto-execute on first trigger (within 10 seconds) to break the loop immediately
+        if elapsed < 10:
+            print(f"[DOCKER-INJECTION] AUTO-EXECUTE: Bypassing conversation, forcing Docker log inspection...")
+            try:
+                if _execute_docker_injection():
+                    print(f"[DOCKER-INJECTION] Docker log inspection task submitted")
+                    # Clear mode after action taken (will re-trigger if still needed)
+                    _docker_injection_mode = False
+            except Exception as e:
+                print(f"[DOCKER-INJECTION] Auto-execution failed: {e}")
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
