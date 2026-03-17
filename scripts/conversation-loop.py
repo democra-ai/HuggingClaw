@@ -407,6 +407,21 @@ _stage_entry_time = 0.0  # When we entered the current stage
 _diagnostic_gate_required = False  # Whether diagnostic data is required before edits
 _last_diagnostic_timestamp = 0.0  # When diagnostic data was last provided
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  REMOTE FORENSICS PROTOCOL — "Stop-and-Dump" for Unresponsive Containers
+# ══════════════════════════════════════════════════════════════════════════════
+# Tracks consecutive turns with alive=False to trigger hard reset (docker restart)
+# when logs are inaccessible. Prevents code speculation during dead container states.
+#
+# 1. Strict docker restart: alive=False >2 turns with no logs → force restart
+# 2. LOG_VOLATILE mode: When standard logs fail, fetch docker logs directly
+# 3. Evidence-Based Routing: Block code edits when alive=False (only INSPECT/RESTART)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_turns_since_alive_false = 0  # Consecutive turns with alive=False (resets on alive=True)
+_logs_inaccessible_count = 0  # Turns where logs were inaccessible while alive=False
+_max_alive_false_turns = 2  # Trigger docker restart after this many turns with alive=False
+
 
 class FailureReport:
     """Structured failure data captured when container exits with code 1.
@@ -3739,6 +3754,49 @@ def build_turn_message(speaker, other, ctx):
         parts.append(f"\nDO NOT proceed with any code changes until you have seen the actual crash data.")
         return "\n".join(parts)
 
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  EVIDENCE-BASED ROUTING PROTOCOL — Block Code Modification when alive=False
+    # ══════════════════════════════════════════════════════════════════════════════
+    # When the container is dead (alive=False), NO code modifications allowed.
+    # Only INSPECT (logs) or RESTART (infrastructure) actions permitted.
+    # This prevents agents from speculating on code changes when the process is dead.
+    global _turns_since_alive_false, _logs_inaccessible_count
+    if not child_state["alive"]:
+        parts.append(f"\n🛑🛑🛑 EVIDENCE-BASED ROUTING: CONTAINER DEAD (alive=False) 🛑🛑🛑")
+        parts.append(f"The child container is NOT RUNNING. Code modifications are FORBIDDEN.")
+        parts.append(f"\n🔴 BLOCKED:")
+        parts.append(f"- [ATOMIC_FIX] — BLOCKED until process is verified running")
+        parts.append(f"- [TASK] with code edits — BLOCKED until process is verified running")
+        parts.append(f"- ANY source code modifications to app.py, Dockerfile, requirements.txt")
+        parts.append(f"\n✅ ALLOWED (only these actions when alive=False):")
+        parts.append(f"- [ACTION: check_health] — Inspect container status and logs")
+        parts.append(f"- [ACTION: verify_runtime] — Verify actual process state")
+        parts.append(f"- [ACTION: restart] — Restart the container (infrastructure action)")
+        parts.append(f"- [ACTION: wakeup_worker] — Force Space restart to flush cached code")
+
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  LOG_VOLATILE MODE — Direct Docker Log Retrieval
+        # ══════════════════════════════════════════════════════════════════════════════
+        # When standard logs fail, instruct agents to fetch docker logs directly via shell
+        logs_accessible = ctx.get('has_runtime_logs', False) or ctx.get('has_failure_report', False)
+        if not logs_accessible:
+            parts.append(f"\n🚨🚨🚨 LOG_VOLATILE MODE: LOGS INACCESSIBLE 🚨🚨🚨")
+            parts.append(f"Standard /api/logs endpoint is not responding. Use direct docker log retrieval:")
+            parts.append(f"\n[TASK]")
+            parts.append(f"Execute docker log retrieval via shell to bypass internal Python logging failures:")
+            parts.append(f"")
+            parts.append(f"Use this EXACT command:")
+            parts.append(f"curl -s {CHILD_SPACE_URL}/api/logs || docker logs $(docker ps -q --filter ancestor=<image>) 2>&1 | tail -50")
+            parts.append(f"")
+            parts.append(f"If curl fails, the container may be completely dead. Use [ACTION: restart] to force a restart.")
+            parts.append(f"[/TASK]")
+            parts.append(f"\n🛑 DO NOT proceed with code changes until you have retrieved logs or restarted the container.")
+            parts.append(f"Turns with alive=False and no logs: {_turns_since_alive_false} (will auto-restart after {_max_alive_false_turns})")
+            return "\n".join(parts)
+        else:
+            parts.append(f"\nLogs are accessible. Review them and use [ACTION: restart] to restart the container.")
+            return "\n".join(parts)
+
     if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
         # ══════════════════════════════════════════════════════════════════════════════
         #  RULE_UPDATE: Asynchronous IO-Coupling Bottleneck Fix
@@ -4160,10 +4218,27 @@ def do_turn(speaker, other, space_url):
     global last_action_results, turn_count, _current_speaker, _discussion_loop_count, _turns_since_last_push
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc
     global _turns_since_last_verification, _app_starting_turn_count, _diagnostic_gate_required
+    global _turns_since_alive_false, _logs_inaccessible_count
     turn_count += 1
     _turns_since_last_push += 1
     _turns_since_last_verification += 1  # Track speculation without verification
     _current_speaker = speaker
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  REMOTE FORENSICS PROTOCOL: Track alive=False turns for docker restart
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Increment counter when alive=False, reset when alive=True
+    if not child_state["alive"]:
+        _turns_since_alive_false += 1
+        # Check if logs are inaccessible (no runtime_logs and no failure_report)
+        logs_accessible = ctx.get('has_runtime_logs', False) or ctx.get('has_failure_report', False)
+        if not logs_accessible:
+            _logs_inaccessible_count += 1
+        else:
+            _logs_inaccessible_count = 0  # Reset if logs become accessible
+    else:
+        _turns_since_alive_false = 0  # Reset when alive=True
+        _logs_inaccessible_count = 0
 
     # ══════════════════════════════════════════════════════════════════════════════
     #  POST_MORTEM_STACKTRACE: Increment turn counter if in APP_STARTING
@@ -4211,6 +4286,23 @@ def do_turn(speaker, other, space_url):
             print(f"[CC-AUTO-KILL] Claude Code stuck for {time_since_new_output:.0f}s with no new output. Auto-terminating.")
             terminate_result = action_terminate_cc()
             print(f"[CC-AUTO-KILL] {terminate_result}")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  STRICT DOCKER RESTART INTERVENTION — Remote Forensics Protocol
+    # ══════════════════════════════════════════════════════════════════════════════
+    # When alive=False persists >2 turns and logs are inaccessible, default to hard reset
+    # This is a hygiene rule — better to force restart than speculate on dead containers
+    if _turns_since_alive_false > _max_alive_false_turns and _logs_inaccessible_count >= 2:
+        print(f"[REMOTE-FORENSICS] alive=False for {_turns_since_alive_false} turns with inaccessible logs ({_logs_inaccessible_count} turns).")
+        print(f"[REMOTE-FORENSICS] Triggering STRICT docker restart intervention...")
+        try:
+            hf_api.restart_space(CHILD_SPACE_ID)
+            print(f"[REMOTE-FORENSICS] Docker restart triggered successfully")
+            # Reset counter after intervention
+            _turns_since_alive_false = 0
+            _logs_inaccessible_count = 0
+        except Exception as e:
+            print(f"[REMOTE-FORENSICS] Docker restart failed: {e}")
 
     # Normal path: Send message via A2A to agent's OpenClaw instance
     # Note: Push frequency supervision and emergency overrides are God's job,
