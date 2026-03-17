@@ -40,6 +40,7 @@ responses for [TASK] blocks, and delegates coding work to Claude Code CLI.
 """
 import json, time, re, requests, sys, os, io, subprocess, threading, datetime, uuid
 from collections import deque
+import queue
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -110,6 +111,157 @@ print(f"[init] HF token:  {HF_TOKEN[:8]}...{HF_TOKEN[-4:]}")
 # ── HuggingFace API ────────────────────────────────────────────────────────────
 from huggingface_hub import HfApi, create_repo, hf_hub_download
 hf_api = HfApi(token=HF_TOKEN)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  EVENT BUS — In-Memory Pub/Sub for Real-Time State Synchronization
+# ══════════════════════════════════════════════════════════════════════════════
+# BREAKS the polling bottleneck by publishing state changes as events.
+# Replaces file-based IPC (cain_status.json) with in-memory queue-based events.
+# Events: CC_STARTED, CC_OUTPUT, CC_FINISHED, CC_ERROR, CHILD_STAGE_CHANGED
+# ══════════════════════════════════════════════════════════════════════════════
+
+class EventBus:
+    """In-memory event bus for real-time state synchronization.
+
+    Replaces file-based IPC with pub/sub pattern. State changes are published
+    as events and immediately available to all subscribers. This breaks the
+    polling bottleneck that causes the 144s deadlock.
+    """
+    def __init__(self):
+        self._subscribers = {}  # event_type -> [queue.Queue]
+        self._event_log = deque(maxlen=100)  # Last 100 events for telemetry
+        self._lock = threading.Lock()
+
+    def subscribe(self, event_type):
+        """Subscribe to an event type. Returns a queue.Queue for receiving events."""
+        with self._lock:
+            if event_type not in self._subscribers:
+                self._subscribers[event_type] = []
+            q = queue.Queue()
+            self._subscribers[event_type].append(q)
+            return q
+
+    def publish(self, event_type, data=None):
+        """Publish an event to all subscribers."""
+        event = {
+            "type": event_type,
+            "data": data,
+            "timestamp": time.time(),
+        }
+        with self._lock:
+            # Log event for telemetry
+            self._event_log.append(event)
+            # Publish to all subscribers
+            for q in self._subscribers.get(event_type, []):
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    pass  # Subscriber queue full, skip
+
+    def get_recent_events(self, event_type=None, since=None):
+        """Get recent events from the event log."""
+        with self._lock:
+            if since is None:
+                since = time.time() - 300  # Last 5 minutes
+            events = [
+                e for e in self._event_log
+                if e["timestamp"] >= since and (event_type is None or e["type"] == event_type)
+            ]
+            return events
+
+
+# Global event bus instance
+event_bus = EventBus()
+
+
+# Event publishing helpers
+def publish_cc_started(task, assigned_by):
+    """Publish CC_STARTED event when Claude Code starts."""
+    event_bus.publish("CC_STARTED", {
+        "task": task[:200],
+        "assigned_by": assigned_by,
+        "timestamp": time.time(),
+    })
+
+def publish_cc_output(line):
+    """Publish CC_OUTPUT event for each line of CC output."""
+    event_bus.publish("CC_OUTPUT", {
+        "line": line,
+        "timestamp": time.time(),
+    })
+
+def publish_cc_finished(result, success, pushed=False):
+    """Publish CC_FINISHED event when Claude Code completes."""
+    event_bus.publish("CC_FINISHED", {
+        "result": result[:500] if result else "",
+        "success": success,
+        "pushed": pushed,
+        "timestamp": time.time(),
+    })
+
+def publish_cc_error(error):
+    """Publish CC_ERROR event when Claude Code fails."""
+    event_bus.publish("CC_ERROR", {
+        "error": str(error)[:500],
+        "timestamp": time.time(),
+    })
+
+def publish_child_stage_changed(old_stage, new_stage, alive):
+    """Publish CHILD_STAGE_CHANGED event when Cain's stage changes."""
+    event_bus.publish("CHILD_STAGE_CHANGED", {
+        "old_stage": old_stage,
+        "new_stage": new_stage,
+        "alive": alive,
+        "timestamp": time.time(),
+    })
+
+def publish_runtime_telemetry(telemetry):
+    """Publish RUNTIME_TELEMETRY event with stdout_tail to break semantic loops."""
+    event_bus.publish("RUNTIME_TELEMETRY", {
+        "telemetry": telemetry[:2000],  # Last 2KB of logs
+        "timestamp": time.time(),
+    })
+
+
+# Runtime Telemetry Injection — breaks semantic analysis loops
+# By fetching stdout_tail on every cycle, we prevent agents from speculating
+# about runtime state without actual data. This forces grounding in reality.
+_last_telemetry_fetch = 0.0
+TELEMETRY_FETCH_INTERVAL = 30  # seconds between telemetry fetches
+
+def get_runtime_telemetry():
+    """Fetch runtime telemetry from Cain's Space.
+
+    This provides stdout_tail to break semantic analysis loops where agents
+    discuss Cain's state without actual runtime data.
+    """
+    global _last_telemetry_fetch
+    now = time.time()
+    # Cache telemetry for TELEMETRY_FETCH_INTERVAL seconds to avoid spamming
+    if now - _last_telemetry_fetch < TELEMETRY_FETCH_INTERVAL:
+        return event_bus.get_recent_events("RUNTIME_TELEMETRY", since=now - TELEMETRY_FETCH_INTERVAL)
+
+    _last_telemetry_fetch = now
+    if not child_state["created"]:
+        return []
+
+    try:
+        # Fetch actual runtime logs
+        resp = requests.get(f"{CHILD_SPACE_URL}/api/logs", timeout=5)
+        if resp.ok:
+            log_data = resp.json()
+            logs = log_data.get("logs", "")
+            if logs:
+                # Get last 500 lines
+                tail_lines = logs.split('\n')[-500:]
+                tail = '\n'.join(tail_lines)
+                publish_runtime_telemetry(tail)
+                return [event_bus._event_log[-1]] if event_bus._event_log else []
+    except Exception as e:
+        publish_cc_error(f"Telemetry fetch failed: {e}")
+
+    return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1277,23 +1429,38 @@ def cc_submit_task(task, assigned_by, ctx):
         _last_cc_output_time = time.time()  # Initialize to now, will update as we get output
         _push_count_this_task = 0  # Reset push count for new task
 
+    # Publish CC_STARTED event for real-time status
+    publish_cc_started(task, assigned_by)
+
     enriched = enrich_task_with_context(task, ctx)
     print(f"[TASK] {assigned_by} assigned to Claude Code ({len(enriched)} chars)...")
 
     def worker():
-        global _cc_stale_count, _last_cc_snapshot, _context_cache
-        result = action_claude_code(enriched)
-        with cc_lock:
-            cc_status["running"] = False
-            cc_status["result"] = result
-            # Remember the last completed task so agents don't re-submit it
-            cc_status["last_completed_task"] = cc_status["task"]
-            cc_status["last_completed_by"] = cc_status["assigned_by"]
-            cc_status["last_completed_at"] = time.time()
-            # Reset stale tracking when CC finishes - critical for adaptive pacing
-            _cc_stale_count = 0
-            _last_cc_snapshot = ""
-        print(f"[CC-DONE] Task from {assigned_by} finished ({len(result)} chars)")
+        global _cc_stale_count, _last_cc_snapshot, _context_cache, _push_count_this_task
+        try:
+            result = action_claude_code(enriched)
+            success = "error" not in result.lower() and "failed" not in result.lower()
+            # Publish CC_FINISHED event with push status
+            publish_cc_finished(result, success, pushed=_push_count_this_task > 0)
+
+            with cc_lock:
+                cc_status["running"] = False
+                cc_status["result"] = result
+                # Remember the last completed task so agents don't re-submit it
+                cc_status["last_completed_task"] = cc_status["task"]
+                cc_status["last_completed_by"] = cc_status["assigned_by"]
+                cc_status["last_completed_at"] = time.time()
+                # Reset stale tracking when CC finishes - critical for adaptive pacing
+                _cc_stale_count = 0
+                _last_cc_snapshot = ""
+            print(f"[CC-DONE] Task from {assigned_by} finished ({len(result)} chars)")
+        except Exception as e:
+            # Publish CC_ERROR event
+            publish_cc_error(e)
+            with cc_lock:
+                cc_status["running"] = False
+                cc_status["result"] = f"Error: {e}"
+            print(f"[CC-ERROR] Task from {assigned_by} failed: {e}")
 
         # ══════════════════════════════════════════════════════════════════════════════
         #  STATE SYNCHRONIZATION & ENGLISH PROTOCOL ENFORCEMENT
@@ -1301,7 +1468,6 @@ def cc_submit_task(task, assigned_by, ctx):
         # After any action, immediately verify the new state to break speculation loops.
         # This prevents agents from operating on stale snapshots of reality.
         # Key: Push → Verify → Update belief state. No more guessing in the dark.
-        global _push_count_this_task
         if _push_count_this_task > 0:
             print(f"[STATE-SYNC] Push detected ({_push_count_this_task} change(s)), verifying new state...")
             # Force immediate health check to get fresh state
@@ -1604,18 +1770,35 @@ def gather_context():
     else:
         ctx.update(_context_cache[cache_key])
 
-    # 4. RUNTIME TELEMETRY INJECTION: Always fetch stdout_tail
+    # 4. RUNTIME TELEMETRY INJECTION: Always fetch stdout_tail from Event Bus
     # Agents need actual runtime logs to ground diagnosis in reality, not hypotheses
     # This breaks semantic analysis loops by providing real execution data
-    ctx["runtime_logs"] = _fetch_runtime_logs()
-    if ctx["runtime_logs"]:
+    telemetry_events = get_runtime_telemetry()
+    if telemetry_events:
+        # Use the most recent telemetry
+        latest_telemetry = telemetry_events[-1]["data"]["telemetry"]
+        ctx["runtime_logs"] = latest_telemetry
         ctx["has_runtime_logs"] = True
+    else:
+        # Fallback to direct fetch if event bus is empty
+        ctx["runtime_logs"] = _fetch_runtime_logs()
+        if ctx["runtime_logs"]:
+            ctx["has_runtime_logs"] = True
 
     # 5. API GROUND TRUTH: Direct probe of /api/state to prevent A2A argument loops
     # Agents should read verified context instead of asking each other about endpoint status
     api_probe = _probe_api_schema()
     if api_probe:
         ctx["api_probe"] = api_probe
+
+    # 6. EVENT STREAM: Recent events from Event Bus for real-time awareness
+    # This allows agents to see CC status changes immediately without waiting for polling
+    recent_events = event_bus.get_recent_events(since=time.time() - 120)  # Last 2 minutes
+    if recent_events:
+        event_summary = []
+        for e in recent_events:
+            event_summary.append(f"{e['type']}: {str(e.get('data', ''))[:100]}")
+        ctx["recent_events"] = "\n".join(event_summary[-10:])  # Last 10 events
 
     return ctx
 
@@ -3340,10 +3523,13 @@ while True:
             # Force immediate context refresh to get actual logs
             _context_cache.clear()
         if new_stage != child_state["stage"]:
+            old_stage = child_state["stage"]
             print(f"[STATUS] {child_state['stage']} → {new_stage}")
             child_state["stage"] = new_stage
             child_state["alive"] = (new_stage == "RUNNING")
             _context_cache.clear()
+            # Publish CHILD_STAGE_CHANGED event for real-time status
+            publish_child_stage_changed(old_stage, new_stage, child_state["alive"])
     except Exception as e:
         print(f"[STATUS] Error: {e}")
 
