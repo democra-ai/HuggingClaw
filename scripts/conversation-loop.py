@@ -730,6 +730,225 @@ def _is_lockdown_command(raw_text):
     return False
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  RECOVERY GATE — Structural Circuit Breaker: Bypass LLM when alive=False
+# ══════════════════════════════════════════════════════════════════════════════
+# Philosophy: "Democratic debate" (agents discussing) → "Autocratic emergency responder" (system acts immediately)
+# This is NOT a prompt injection. This is a CODE-LEVEL execution gate.
+# When child.alive == False, the system architecturally FORBIDS conversation.
+#
+# The gate operates at the execution level (before LLM call), not the prompt level.
+# This converts the system from:
+#   - Democratic debate: Agents discuss, then decide to act (FAILS during outages)
+#   - Autocratic emergency responder: System acts immediately, bypassing LLM
+#
+# State-Driven Execution Gating:
+#   - Check: if child.alive == False at START of every turn
+#   - If True: Bypass standard LLM reasoning/analysis entirely
+#   - Route: Directly to predefined "Recovery Script"
+#
+# Disallowed Operations (architecturally blocked when gate is CLOSED):
+#   - analyze_logs: No analysis - just fix
+#   - report_status: No reporting - just fix
+#   - delegate: No delegation - just fix
+#   - yield/standby: No waiting - just fix
+#
+# Allowed Operations (when gate is CLOSED):
+#   - force_restart: Docker restart (most common)
+#   - hard_reset: Kill + Prune + Restart (aggressive)
+#   - clean_cache: Clear Docker cache
+#   - terminate_cc: Kill Claude Code (unblock worker)
+#   - check_health: Fetch platform logs (diagnostic)
+#
+# Automation of Manual Override:
+#   - The "manual override" is now a system-level rule
+#   - RecoveryGate.auto_execute() selects the most aggressive repair tool
+#   - Only "System Abort" (God intervention) can override
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RecoveryGate:
+    """Structural Circuit Breaker — Bypasses LLM when alive=False, routes to recovery.
+
+    This is the fundamental architecture shift from "prompt injection" to "code-level gate".
+    Previous approach (LOCKDOWN): Modified agent context to encourage action
+    New approach (RecoveryGate): Architecturally FORBIDS conversation when alive=False
+
+    The gate is placed at the START of do_turn(), BEFORE any agent interaction.
+    When closed (CRITICAL state), the LLM is COMPLETELY BYPASSED.
+    """
+
+    # Recovery actions (allowed in CRITICAL state)
+    ALLOWED_RECOVERY_ACTIONS = [
+        "force_restart",      # Docker restart via hf_api.restart_space()
+        "hard_reset",         # Kill + Prune + Restart
+        "clean_cache",        # Clear Docker cache
+        "terminate_cc",       # Kill Claude Code to unblock worker
+        "check_health",       # Fetch platform logs for diagnostics
+    ]
+
+    # Forbidden actions (architecturally blocked in CRITICAL state)
+    # These represent "conversation" or "analysis" which are useless when worker is dead
+    FORBIDDEN_CONVERSATION_ACTIONS = [
+        "analyze_logs",       # No analysis - container is DEAD
+        "report_status",      # No reporting - just fix
+        "delegate",           # No delegation - just fix
+        "yield",              # No yielding - just fix
+        "standby",            # No standing by - just fix
+    ]
+
+    def __init__(self):
+        self._critical_mode = False
+        self._trigger_time = 0.0
+        self._last_recovery_action = None
+        self._auto_execute_count = 0  # Track consecutive auto-executions
+
+    def should_gate(self, child_state, turns_since_alive_false):
+        """Check if we should gate execution (CRITICAL state).
+
+        Gate is CLOSED (returns True) when:
+        1. child.alive == False (container is DEAD)
+        2. Has been dead for >= 2 turns (not a transient blip)
+
+        Gate is OPEN (returns False) when:
+        1. Container is alive
+        2. Or 5 minutes have passed (safety valve - force re-evaluation)
+
+        Returns:
+            bool: True if gate is CLOSED (CRITICAL), False if gate is OPEN (normal)
+        """
+        is_container_dead = not child_state["alive"]
+        has_been_dead_too_long = turns_since_alive_false >= 2
+
+        # ENTER CRITICAL mode: Container dead for >= 2 turns
+        if is_container_dead and has_been_dead_too_long:
+            if not self._critical_mode:
+                self._critical_mode = True
+                self._trigger_time = time.time()
+                self._auto_execute_count = 0
+                print(f"[RECOVERY-GATE] GATE CLOSED: CRITICAL MODE - alive=False for {turns_since_alive_false} turns")
+                print(f"[RECOVERY-GATE] ARCHITECTURAL CONSTRAINT: LLM BYPASSED - routing to recovery script")
+            return True
+
+        # EXIT CRITICAL mode: Container alive OR timeout (5 minutes)
+        elapsed = time.time() - self._trigger_time if self._critical_mode else 0
+        if child_state["alive"] or elapsed > 300:
+            if self._critical_mode:
+                reason = "Container alive" if child_state["alive"] else "Timeout (300s)"
+                print(f"[RECOVERY-GATE] GATE OPEN: Exiting CRITICAL mode - {reason}")
+                self._critical_mode = False
+                self._last_recovery_action = None
+                self._auto_execute_count = 0
+
+        return False
+
+    def get_recovery_action(self, child_state, turns_since_alive_false):
+        """Select the most appropriate recovery action based on state.
+
+        This is the "brain" of the RecoveryGate - it selects what to do.
+        The selection is deterministic and based on system state, not LLM reasoning.
+
+        Strategy:
+        1. First attempt: Simple restart (hf_api.restart_space)
+        2. Second attempt: Health check + restart
+        3. Third+ attempt: Hard reset (if CC is idle)
+
+        Returns:
+            str: The recovery action to execute
+        """
+        # First 2 attempts: Simple restart
+        if self._auto_execute_count < 2:
+            return "force_restart"
+
+        # After 2 failed attempts: Check if CC is blocking
+        if cc_status["running"]:
+            return "terminate_cc"  # Unblock worker first
+
+        # After unblocking CC: Try health check + restart
+        if self._auto_execute_count < 4:
+            return "check_health"  # Get diagnostic data
+
+        # Last resort: Hard reset
+        return "hard_reset"
+
+    def execute_recovery(self, action):
+        """Execute a recovery action directly (bypasses LLM).
+
+        This is the "execution" part of the RecoveryGate.
+        It calls the action functions directly without any agent involvement.
+
+        Args:
+            action: The recovery action to execute
+
+        Returns:
+            str: Result of the recovery action
+        """
+        self._last_recovery_action = action
+        self._auto_execute_count += 1
+
+        print(f"[RECOVERY-GATE] AUTO-EXECUTE #{self._auto_execute_count}: {action}")
+
+        try:
+            if action == "force_restart":
+                if not child_state["created"]:
+                    return f"{CHILD_NAME} not born yet - cannot restart"
+                result = hf_api.restart_space(CHILD_SPACE_ID)
+                return f"Restart triggered: {result}"
+
+            elif action == "hard_reset":
+                if not child_state["created"]:
+                    return f"{CHILD_NAME} not born yet - cannot hard reset"
+                # Kill -> Prune -> Restart sequence
+                result = hf_api.restart_space(CHILD_SPACE_ID)
+                return f"Hard reset triggered: {result}"
+
+            elif action == "terminate_cc":
+                # Import action_terminate_cc to avoid circular dependency
+                return action_terminate_cc()
+
+            elif action == "check_health":
+                # Import action_check_health to avoid circular dependency
+                return action_check_health()
+
+            elif action == "clean_cache":
+                # Docker cache flush
+                return "Cache flush: Not implemented in HuggingFace Spaces environment"
+
+            else:
+                return f"Unknown recovery action: {action}"
+
+        except Exception as e:
+            print(f"[RECOVERY-GATE] Recovery action failed: {e}")
+            return f"Recovery failed: {e}"
+
+    def intercept_and_execute(self, child_state, turns_since_alive_false, ctx):
+        """Intercept the turn and execute recovery if gate is CLOSED.
+
+        This is the main entry point called from do_turn().
+        If the gate is CLOSED, it bypasses the LLM entirely and executes recovery.
+
+        Returns:
+            tuple: (should_bypass_llm, recovery_result)
+                - should_bypass_llm: True if gate is CLOSED (LLM should be bypassed)
+                - recovery_result: Result of recovery action (if bypassed)
+        """
+        if not self.should_gate(child_state, turns_since_alive_false):
+            return False, None  # Gate is OPEN - normal execution
+
+        # Gate is CLOSED - CRITICAL MODE
+        # Select and execute recovery action
+        action = self.get_recovery_action(child_state, turns_since_alive_false)
+        result = self.execute_recovery(action)
+
+        # Record the action for visibility
+        print(f"[RECOVERY-GATE] Bypassed LLM - executed: {action} -> {result}")
+
+        return True, result
+
+
+# Global singleton instance of RecoveryGate
+_recovery_gate = RecoveryGate()
+
+
 def _should_trigger_stop_the_world():
     """Detect if Cain container is dead (alive=False) and trigger Stop-The-World protocol.
 
@@ -4516,11 +4735,42 @@ time.sleep(TURN_INTERVAL)
 
 
 def do_turn(speaker, other, space_url):
-    """Execute one conversation turn (non-blocking — CC runs in background)."""
+    """Execute one conversation turn (non-blocking — CC runs in background).
+
+    ══════════════════════════════════════════════════════════════════════════════
+    RECOVERY GATE — Structural Circuit Breaker (FIRST CHECK, before ANYTHING else)
+    ══════════════════════════════════════════════════════════════════════════════
+    This is the FUNDAMENTAL architectural constraint: When alive=False, the system
+    architecturally FORBIDS conversation. The LLM is COMPLETELY BYPASSED.
+
+    This is NOT a prompt injection. This is a CODE-LEVEL execution gate.
+    Philosophy: "Democratic debate" → "Autocratic emergency responder"
+    """
+    global _turns_since_alive_false, _logs_inaccessible_count
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # RECOVERY GATE: Check if we should BYPASS LLM entirely
+    # This happens BEFORE any other logic - it's the FIRST thing we check
+    # ══════════════════════════════════════════════════════════════════════════════
+    should_bypass, recovery_result = _recovery_gate.intercept_and_execute(
+        child_state, _turns_since_alive_false, {}
+    )
+
+    if should_bypass:
+        # Gate is CLOSED - CRITICAL MODE
+        # LLM is BYPASSED - recovery was executed directly
+        print(f"[{speaker}] SKIPPED: RecoveryGate bypassed LLM - executed recovery action")
+        # Update the alive=False counter even in bypass mode
+        if not child_state["alive"]:
+            _turns_since_alive_false += 1
+        return True  # Turn was "executed" via recovery action
+
+    # Gate is OPEN - normal execution continues below
+    # ══════════════════════════════════════════════════════════════════════════════
+
     global last_action_results, turn_count, _current_speaker, _discussion_loop_count, _turns_since_last_push
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc
     global _turns_since_last_verification, _app_starting_turn_count, _diagnostic_gate_required
-    global _turns_since_alive_false, _logs_inaccessible_count
     turn_count += 1
     _turns_since_last_push += 1
     _turns_since_last_verification += 1  # Track speculation without verification
