@@ -656,6 +656,79 @@ _stop_the_world_mode = False  # When True, ONLY infra recovery allowed
 _stop_the_world_trigger_time = 0.0  # When STOP_THE_WORLD was triggered
 _stop_the_world_initiated_reset = False  # Whether reset command was issued
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  LOCKDOWN MODE — Execution-only protocol for persistent alive=False states
+# ══════════════════════════════════════════════════════════════════════════════
+# Trigger: alive == False persists for > 2 turns
+# Action: Strip all conversational capabilities, ONLY allow raw shell commands
+# Goal: Force rapid trial-and-error recovery instead of analysis paralysis
+_lockdown_mode = False  # When True, agents CANNOT speak, only execute commands
+_lockdown_trigger_time = 0.0  # When LOCKDOWN was triggered
+_lockdown_command_executed = False  # Whether a command was executed (for auto-recovery)
+_lockdown_allowed_commands = [
+    "restart", "docker kill", "docker start", "systemctl restart",
+    "cache flush", "flush cache", "reboot", "kill", "stop"
+]
+
+def _should_trigger_lockdown():
+    """Detect if alive=False persists for > 2 turns and trigger LOCKDOWN mode.
+
+    LOCKDOWN is the "Circuit Breaker" for analysis paralysis. When the container
+    is dead for multiple turns and agents are still discussing, we strip ALL
+    conversational capabilities and ONLY allow raw infrastructure commands.
+
+    Triggers when:
+    1. child_state["alive"] == False (container is dead)
+    2. _turns_since_alive_false > 2 (persists for > 2 turns)
+
+    Auto-recovery: Exits LOCKDOWN after any command is executed (success or fail).
+    """
+    global _lockdown_mode, _lockdown_trigger_time, _lockdown_command_executed
+
+    # Trigger when alive=False persists for > 2 turns
+    if not child_state["alive"] and _turns_since_alive_false > _max_alive_false_turns:
+        if not _lockdown_mode:
+            _lockdown_mode = True
+            _lockdown_trigger_time = time.time()
+            _lockdown_command_executed = False
+            print(f"[LOCKDOWN] TRIGGERED: alive=False for {_turns_since_alive_false} turns")
+            print(f"[LOCKDOWN] STRIPPING all conversational capabilities - EXECUTION-ONLY mode")
+        return True
+
+    # Auto-recovery: Exit LOCKDOWN when a command was executed
+    if _lockdown_mode and _lockdown_command_executed:
+        print(f"[LOCKDOWN] Auto-recovery: command executed, exiting LOCKDOWN")
+        _lockdown_mode = False
+        _lockdown_command_executed = False
+        return False
+
+    # Also reset when alive=True
+    if child_state["alive"] and _lockdown_mode:
+        print(f"[LOCKDOWN] Container alive again, exiting LOCKDOWN")
+        _lockdown_mode = False
+        _lockdown_command_executed = False
+
+    return _lockdown_mode
+
+
+def _is_lockdown_command(raw_text):
+    """Check if the raw text contains a LOCKDOWN-allowed infrastructure command."""
+    global _lockdown_command_executed
+    text_lower = raw_text.lower()
+
+    # Check for allowed commands
+    for cmd in _lockdown_allowed_commands:
+        if cmd.lower() in text_lower:
+            _lockdown_command_executed = True
+            return True
+
+    # Check for [ACTION: restart] specifically
+    if "[action: restart]" in text_lower or "[action:restart]" in text_lower:
+        _lockdown_command_executed = True
+        return True
+
+    return False
+
 
 def _should_trigger_stop_the_world():
     """Detect if Cain container is dead (alive=False) and trigger Stop-The-World protocol.
@@ -3802,6 +3875,7 @@ def build_turn_message(speaker, other, ctx):
     global _force_push_mode, _force_push_skip_termination, _emergency_override_active
     global _turns_since_alive_false, _logs_inaccessible_count
     global _circuit_breaker_triggered, _circuit_breaker_turn_count
+    global _lockdown_mode
     parts = []
 
     # Brief role context (supplements agent's SOUL.md until it's fully configured)
@@ -3836,6 +3910,31 @@ def build_turn_message(speaker, other, ctx):
         parts.append(f"- [ACTION: restart] — Force restart the Space to kill zombie process")
         parts.append(f"\n🛑 DO NOT discuss. DO NOT write [TASK]. DO NOT analyze.")
         parts.append(f"Use [ACTION: restart] immediately. Trial-and-error is GOOD.")
+        return "\n".join(parts)
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  LOCKDOWN MODE — Execution-only protocol for persistent alive=False states
+    # ══════════════════════════════════════════════════════════════════════════════
+    # When alive=False persists for > 2 turns, strip ALL conversational capabilities.
+    # Agents can ONLY execute raw infrastructure commands - NO discussion, NO analysis.
+    global _lockdown_mode
+    if _should_trigger_lockdown():
+        parts.append(f"\n🔒🔒🔒 [LOCKDOWN] EXECUTION-ONLY MODE 🔒🔒🔒")
+        parts.append(f"alive=False for {_turns_since_alive_false} turns — ANALYSIS PARALYSIS DETECTED")
+        parts.append(f"\n🛑🛑🛑 ALL CONVERSATIONAL PERMISSIONS REVOKED 🛑🛑🛑")
+        parts.append(f"\nYou are STRIPPED of all permissions to speak, analyze, or plan.")
+        parts.append(f"The ONLY thing you can do is execute infrastructure recovery commands.")
+        parts.append(f"\n✅ ALLOWED (execute these NOW):")
+        parts.append(f"  - [ACTION: restart] — Force Docker restart (Kill -> Prune -> Restart)")
+        parts.append(f"  - [ACTION: docker_kill_start] — Kill zombie process, restart container")
+        parts.append(f"  - Systemctl restart, Docker kill/start, Cache flush, Reboot")
+        parts.append(f"\n🚫 FORBIDDEN:")
+        parts.append(f"  - NO conversation (you cannot speak)")
+        parts.append(f"  - NO analysis (you cannot think)")
+        parts.append(f"  - NO planning (you cannot strategize)")
+        parts.append(f"  - NO [TASK] blocks (assigning tasks requires permission you don't have)")
+        parts.append(f"\n💡 Auto-recovery: Once you execute ANY command, LOCKDOWN will exit.")
+        parts.append(f"Trial-and-error is GOOD. Execute a command NOW.")
         return "\n".join(parts)
 
     # FILE CLAIM PROTOCOL — Prevents both agents from editing the same file simultaneously
