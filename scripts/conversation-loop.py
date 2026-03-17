@@ -3619,6 +3619,28 @@ def build_turn_message(speaker, other, ctx):
     # CRITICAL: Check child ERROR state FIRST, before cc_busy check
     # When Cain is broken, agents need aggressive "push now" guidance, not "plan and wait"
     if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  RULE_UPDATE: Asynchronous IO-Coupling Bottleneck Fix
+        # ══════════════════════════════════════════════════════════════════════════════
+        # Shift from "Reboot-to-Test" to "Synthetic Validation"
+        # Hypothesis generation is FORBIDDEN until logs are visible
+        logs_visible = ctx.get('has_runtime_logs', False) or ctx.get('has_failure_report', False)
+        if not logs_visible and not cc_busy:
+            parts.append(f"\n🛑🛑🛑 RULE_UPDATE: ON CRASH PROTOCOL 🛑🛑🛑")
+            parts.append(f"Cain has {child_state['stage']} but NO LOGS are visible in context!")
+            parts.append(f"\nFORBIDDEN:")
+            parts.append(f"- Hypothesis generation (do NOT guess what the error might be)")
+            parts.append(f"- Speculation about causes")
+            parts.append(f"- Discussion of potential fixes")
+            parts.append(f"\nREQUIRED - You MUST fetch logs FIRST before ANY other action:")
+            parts.append(f"- Use: curl -s {CHILD_SPACE_URL}/api/logs | tail -50")
+            parts.append(f"- Or: [ACTION: check_health] to fetch diagnostic data")
+            parts.append(f"- Or: [ACTION: list_files:space] to check .env configuration")
+            parts.append(f"\nDO NOT write [TASK] until you have SEEN the actual Traceback!")
+            parts.append(f"The first agent to speak MUST output a log retrieval command.")
+            return "\n".join(parts)
+        # ══════════════════════════════════════════════════════════════════════════════
+
         if cc_status.get("result"):
             if recent_task_reminder:
                 last_completed, last_by, last_at = recent_task_reminder
@@ -3750,8 +3772,18 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"Write ONLY [TASK]...[/TASK] this turn. NO other text.")
             parts.append(f"Agents keep saying 'monitoring' and 'planning' instead of pushing. STOP IT.")
         else:
-            parts.append(f"\nClaude Code JUST FINISHED with a result. Review it briefly, then write your [TASK]...[/TASK] IMMEDIATELY.")
-            parts.append(f"Do NOT discuss at length. 1 turn max to review, then [TASK]. Your priority is SPEED of iteration.")
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  RULE_UPDATE: Validation Phase — Dry-Run Before Pushing
+            # ══════════════════════════════════════════════════════════════════════════════
+            # Separate Validation from Execution: Verify code validity BEFORE pushing to Cain
+            parts.append(f"\nClaude Code JUST FINISHED with a result.")
+            parts.append(f"\n⚠️ VALIDATION PHASE REQUIRED:")
+            parts.append(f"Before declaring a fix 'Ready', you MUST verify the changes are valid:")
+            parts.append(f"- Use: [ACTION: verify_runtime] to check syntax and imports")
+            parts.append(f"- Or manually validate: python -c \"import syntax_check; from brain_minimal import *\"")
+            parts.append(f"- If the import/syntax check FAILS, the patch is REJECTED. Fix it first.")
+            parts.append(f"\nAfter validation passes: write [TASK]...[/TASK] IMMEDIATELY.")
+            parts.append(f"Do NOT discuss at length. 1 turn max to validate, then [TASK].")
     elif child_state["alive"]:
         # Check cooldown even when alive - a recent push may have triggered cooldown
         check_and_clear_cooldown()
