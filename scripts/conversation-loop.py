@@ -582,6 +582,13 @@ _system_analysis_count = 0  # Tracks consecutive analysis turns from God
 _MAX_ANALYSIS_TURNS = 2  # Trigger after this many consecutive analysis turns
 _system_circuit_breaker_trigger_time = 0.0  # When SYSTEM_CIRCUIT_BREAKER was triggered
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  BYPASS_DIAGNOSTICS PROTOCOL — Cold Boot forces resume of standard bootstrap
+# ══════════════════════════════════════════════════════════════════════════════
+# Trigger: God issues [ACTION: system_cold_boot] to break philosophical deadlock
+# Action: Bypass all diagnostic loops, force Child state reset, resume Hello World
+_bypass_diagnostics = False  # When True, agents skip diagnostic loops and force bootstrap
+
 def _detect_chattering_loop():
     """Detect if agents are stuck in `.env` or port discussion loop."""
     global _chatter_detection_count, _last_chatter_keywords
@@ -1344,6 +1351,53 @@ def action_reset_circuit_breaker():
         return "Circuit breaker is not triggered. Nothing to reset."
     _reset_circuit_breaker()
     return "CIRCUIT BREAKER RESET: Normal operations resumed. Adam/Eve can now submit tasks again."
+
+
+def action_system_cold_boot():
+    """SYSTEM COLD BOOT PROTOCOL — Force Majeure mechanism to break philosophical deadlock.
+
+    This is the "Force Majeure" mechanism that bypasses the Architect's diagnostic
+    loop and forces a reset of the hierarchical state when the system enters a
+    philosophical deadlock.
+
+    Actions:
+    1. Halt recursive analysis
+    2. Force Child state to INIT (override BOOTSTRAPPING)
+    3. Set Child status to AWAITING_INPUT
+    4. Reset alive flag to True (virtual hot-swap)
+    5. Purge ESCALATED workflow
+    6. Set BYPASS_DIAGNOSTICS directive
+
+    Only God can call this action.
+    """
+    global child_state, _escalated, _supervisor_mode, _circuit_break_reason, _bypass_diagnostics
+    global _app_starting_turn_count, _diagnostic_gate_required, _system_circuit_breaker_tripped
+
+    # 1. Halt recursive analysis
+    _system_circuit_breaker_tripped = False
+    _system_analysis_count = 0
+
+    # 2. Reset hierarchy - Force Child state to INIT
+    child_state["stage"] = "INIT"
+    child_state["status"] = "AWAITING_INPUT"
+    child_state["alive"] = True  # Virtual hot-swap
+
+    # 3. Reset diagnostic counters
+    _app_starting_turn_count = 0
+    _diagnostic_gate_required = False
+
+    # 4. Purge ESCALATED workflow
+    if _escalated:
+        _reset_circuit_breaker()
+
+    # 5. Set BYPASS_DIAGNOSTICS flag
+    _bypass_diagnostics = True
+
+    print(f"[COLD-BOOT] SYSTEM COLD BOOT PROTOCOL EXECUTED")
+    print(f"[COLD-BOOT] Child state forced: stage=INIT, status=AWAITING_INPUT, alive=True")
+    print(f"[COLD-BOOT] BYPASS_DIAGNOSTICS directive set for Adam")
+
+    return "SYSTEM COLD BOOT PROTOCOL EXECUTED: Child state reset to INIT, alive=True, BYPASS_DIAGNOSTICS directive set. Adam should resume standard Hello World bootstrap immediately."
 
 
 # ── Atomic Fix Protocol (Executor Mode) ────────────────────────────────────────
@@ -3341,6 +3395,14 @@ def parse_and_execute_turn(raw_text, ctx):
             result = action_reset_circuit_breaker()
             results.append({"action": "reset_circuit_breaker", "result": result})
 
+    # 1bc. Handle [ACTION: system_cold_boot] — God-only action to force cold boot (Force Majeure)
+    if re.search(r'\[ACTION:\s*system_cold_boot\]', raw_text):
+        if _current_speaker != "God":
+            results.append({"action": "system_cold_boot", "result": "BLOCKED: Only God can force a system cold boot."})
+        else:
+            result = action_system_cold_boot()
+            results.append({"action": "system_cold_boot", "result": result})
+
     # 1c. Handle [CLAIM: filename] — File claim protocol (prevents contention thrashing)
     # Agents must claim a file before assigning a TASK to it. Claims expire after 2 turns.
     global _file_claims, _claim_turn_counter
@@ -3609,6 +3671,11 @@ def parse_and_execute_turn(raw_text, ctx):
         if _discussion_loop_count > 0:
             print(f"[LOOP-DISCUSS] Reset (task assigned)")
         _discussion_loop_count = 0
+        # Clear BYPASS_DIAGNOSTICS flag when task assigned (agents are back on track)
+        global _bypass_diagnostics
+        if _bypass_diagnostics:
+            _bypass_diagnostics = False
+            print(f"[COLD-BOOT] BYPASS_DIAGNOSTICS flag cleared (task assigned)")
     else:
         # Increment when: no task assigned (potential discussion loop)
         # This includes both CC idle AND CC busy - agents should always push work!
@@ -3720,6 +3787,25 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"⚠️ Eve has verified the system — external tasks will be BLOCKED unless Eve's status changes.")
         else:
             parts.append(f"✓ External tasks permitted — Eve's status allows verification.")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  BYPASS_DIAGNOSTICS PROTOCOL: Cold Boot Directive
+    # ══════════════════════════════════════════════════════════════════════════════
+    # When God issues [ACTION: system_cold_boot], all diagnostic loops are bypassed
+    # and agents must resume standard Hello World bootstrap immediately.
+    global _bypass_diagnostics
+    if _bypass_diagnostics:
+        parts.append(f"\n=== ⚠️ BYPASS_DIAGNOSTICS PROTOCOL ACTIVE ===")
+        parts.append(f"God has issued a SYSTEM COLD BOOT PROTOCOL to break philosophical deadlock.")
+        parts.append(f"")
+        parts.append(f"DIRECTIVE TO {speaker}:")
+        parts.append(f"1. HALT all recursive architectural analysis")
+        parts.append(f"2. RESUME standard Hello World bootstrap immediately")
+        parts.append(f"3. DO NOT engage in diagnostic speculation")
+        parts.append(f"4. Push working code, not design proposals")
+        parts.append(f"")
+        parts.append(f"The Child state has been force-reset: stage=INIT, alive=True")
+        parts.append(f"This flag will clear after a successful [TASK] assignment.")
 
     # Auto-gathered context
     parts.append(f"\n=== {CHILD_NAME}'S CURRENT STATE ===")
