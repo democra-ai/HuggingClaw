@@ -591,6 +591,16 @@ _docker_injection_trigger_time = 0.0  # When DOCKER_INJECTION was triggered
 _docker_injection_result = None  # Cached Docker logs to inject into context
 _last_docker_injection_turn = 0  # Track last turn we injected (prevent spam)
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  LOGS_OVERRIDE PROTOCOL — Halt application edits, force platform inspection
+# ══════════════════════════════════════════════════════════════════════════════
+# Trigger: Cain in error state with NO logs visible in context
+# Action: FORBID ATOMIC_FIX, REQUIRE diagnostic task with exact shell command
+# Goal: Verify platform health before allowing application-layer edits
+_logs_override_mode = False  # When True, ATOMIC_FIX is BLOCKED
+_logs_override_trigger_time = 0.0  # When LOGS_OVERRIDE was triggered
+_logs_override_container_verified = False  # Whether container status was checked
+
 
 def _should_trigger_docker_injection():
     """Detect if Cain is in error state but agents keep discussing instead of pushing.
@@ -688,6 +698,43 @@ REPORT:
 
     _last_docker_injection_turn = current_turn
     return True
+
+
+def _should_trigger_logs_override():
+    """Detect if Cain is in error state with NO logs visible.
+
+    LOGS_OVERRIDE PROTOCOL:
+    - When Cain is in RUNTIME_ERROR/BUILD_ERROR/CONFIG_ERROR
+    - But NO logs are visible in context (no has_runtime_logs, no has_failure_report)
+    - AND agents are trying to push application code changes
+    - Then: FORBID ATOMIC_FIX, REQUIRE diagnostic task with exact shell command
+
+    This prevents the "application-layer loop" where agents modify code
+    without ever inspecting the actual crash data.
+    """
+    # Must have Cain created
+    if not child_state["created"]:
+        return False
+
+    # Check if Cain is in error/crash state
+    is_error_state = (
+        child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR") or
+        child_state["status"] == STATUS_CRASHED
+    )
+
+    if not is_error_state:
+        return False
+
+    # Gather context to check if logs are visible
+    ctx = gather_context()
+    logs_visible = ctx.get('has_runtime_logs', False) or ctx.get('has_failure_report', False)
+
+    # Trigger: Error state AND no logs visible
+    if not logs_visible:
+        return True
+
+    return False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  LIVENESS & READINESS — /healthz Polling for Split-Brain Prevention
@@ -3332,6 +3379,11 @@ def parse_and_execute_turn(raw_text, ctx):
             results.append({"action": "atomic_fix", "result": f"BLOCKED: Cain is {child_state['stage']}. Wait for it to finish."})
         elif cc_status["running"]:
             results.append({"action": "atomic_fix", "result": f"BLOCKED: Claude Code is running. Use [ACTION: terminate_cc] first, then retry ATOMIC_FIX."})
+        elif _logs_override_mode:
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  LOGS_OVERRIDE PROTOCOL: Block application edits until platform health verified
+            # ══════════════════════════════════════════════════════════════════════════════
+            results.append({"action": "atomic_fix", "result": f"BLOCKED: LOGS_OVERRIDE PROTOCOL ACTIVE. Cain is in error state with NO LOGS visible. You MUST fetch platform logs FIRST before any application edits. Use: curl -s {CHILD_SPACE_URL}/api/logs | tail -100"})
         else:
             check_and_clear_cooldown()
             if last_rebuild_trigger_at > 0:
@@ -3618,6 +3670,30 @@ def build_turn_message(speaker, other, ctx):
     # Now state-specific guidance
     # CRITICAL: Check child ERROR state FIRST, before cc_busy check
     # When Cain is broken, agents need aggressive "push now" guidance, not "plan and wait"
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  LOGS_OVERRIDE PROTOCOL: Halt application edits, force platform inspection
+    # ══════════════════════════════════════════════════════════════════════════════
+    global _logs_override_mode, _logs_override_container_verified
+    if _logs_override_mode:
+        parts.append(f"\n🛑🛑🛑 LOGS_OVERRIDE PROTOCOL ACTIVE 🛑🛑🛑")
+        parts.append(f"Cain is in error state with NO LOGS visible. Platform health must be verified BEFORE application edits.")
+        parts.append(f"\n🔴 FORBIDDEN:")
+        parts.append(f"- [ATOMIC_FIX] is BLOCKED until platform health is verified")
+        parts.append(f"- ANY source code edits to app.py, Dockerfile, requirements.txt")
+        parts.append(f"- Hypothesis generation or speculation about causes")
+        parts.append(f"\n✅ REQUIRED - You MUST output a [TASK] with the EXACT diagnostic command:")
+        parts.append(f"[TASK]")
+        parts.append(f"Fetch the platform logs from Cain's container to diagnose the crash.")
+        parts.append(f"")
+        parts.append(f"Use this EXACT command:")
+        parts.append(f"curl -s {CHILD_SPACE_URL}/api/logs | tail -100")
+        parts.append(f"")
+        parts.append(f"Report the EXACT error message, line number, and full stack trace.")
+        parts.append(f"[/TASK]")
+        parts.append(f"\nDO NOT proceed with any code changes until you have seen the actual crash data.")
+        return "\n".join(parts)
+
     if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
         # ══════════════════════════════════════════════════════════════════════════════
         #  RULE_UPDATE: Asynchronous IO-Coupling Bottleneck Fix
@@ -4595,6 +4671,31 @@ while True:
                     _docker_injection_mode = False
             except Exception as e:
                 print(f"[DOCKER-INJECTION] Auto-execution failed: {e}")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  LOGS_OVERRIDE PROTOCOL — Halt application edits, force platform inspection
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Detect when Cain is in error state but NO logs are visible
+    # This FORBIDS ATOMIC_FIX and REQUIRES a diagnostic task
+    if not _logs_override_mode:
+        if _should_trigger_logs_override():
+            print(f"[LOGS-OVERRIDE] TRIGGERED: Cain in error state with NO LOGS visible!")
+            _logs_override_mode = True
+            _logs_override_trigger_time = time.time()
+            _logs_override_container_verified = False
+            # Clear context to force log re-fetch
+            _context_cache.clear()
+
+    # Reset LOGS_OVERRIDE mode when logs become visible or after 3 minutes (safety valve)
+    if _logs_override_mode:
+        ctx = gather_context()
+        logs_visible = ctx.get('has_runtime_logs', False) or ctx.get('has_failure_report', False)
+        if logs_visible:
+            print(f"[LOGS-OVERRIDE] Logs now visible, exiting override mode")
+            _logs_override_mode = False
+        elif time.time() - _logs_override_trigger_time > 180:
+            print(f"[LOGS-OVERRIDE] Mode timeout (180s), resetting to normal")
+            _logs_override_mode = False
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
