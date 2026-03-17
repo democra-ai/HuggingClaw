@@ -656,6 +656,75 @@ def action_atomic_fix(file_changes, description):
         return f"Atomic fix failed: {e}"
 
 
+# ── Direct Runtime Injection Protocol ───────────────────────────────────────────
+# BREAKS the passive polling deadlock by providing immediate worker wakeup.
+# When the worker enters IDLE state but new work is available, this protocol
+# injects a runtime signal to bypass file-watcher delays and force immediate
+# task processing. This turns the system into a reactive architecture.
+
+RUNTIME_TRIGGER_FILE = "/tmp/cc-wakeup-trigger"
+_runtime_trigger_enabled = True  # Master switch for the protocol
+
+
+def action_wakeup_worker():
+    """Immediately trigger worker wakeup by injecting a runtime signal.
+
+    This action creates a trigger file that the worker actively monitors,
+    bypassing any passive polling delays. The worker transitions from
+    IDLE to PROCESSING immediately upon detecting the trigger.
+
+    This is the DIRECT RUNTIME INJECTION protocol — a reactive mechanism
+    that eliminates the deadlock where workers wait for file changes.
+    """
+    if not child_state["created"]:
+        return f"{CHILD_NAME} not born yet."
+
+    if cc_status["running"]:
+        return f"BLOCKED: Claude Code is already running. Worker is active."
+
+    # Create the trigger file - this is the "injection" point
+    try:
+        with open(RUNTIME_TRIGGER_FILE, 'w') as f:
+            f.write(f"wakeup_at={time.time()}\n")
+            f.write(f"triggered_by=direct_runtime_injection\n")
+        print(f"[RUNTIME-INJECTION] Wakeup trigger created at {RUNTIME_TRIGGER_FILE}")
+
+        # Force immediate state transition check
+        global _worker_heartbeat_deadlock_detected
+        if child_state["alive"] and not cc_status["running"]:
+            _worker_heartbeat_deadlock_detected = True
+            print(f"[RUNTIME-INJECTION] Worker heartbeat deadlock FLAGGED")
+    except Exception as e:
+        return f"Failed to create wakeup trigger: {e}"
+
+    return f"✅ RUNTIME INJECTION: Worker wakeup signal sent. Trigger file created at {RUNTIME_TRIGGER_FILE}"
+
+
+def _check_runtime_trigger():
+    """Check for runtime trigger and immediately process pending work.
+
+    This is the reactive side of the Direct Runtime Injection Protocol.
+    Called during each turn to actively check for wakeup signals instead
+    of relying on passive file watching.
+    """
+    if not _runtime_trigger_enabled:
+        return
+
+    if os.path.exists(RUNTIME_TRIGGER_FILE):
+        try:
+            # Read trigger metadata
+            with open(RUNTIME_TRIGGER_FILE, 'r') as f:
+                content = f.read()
+            # Remove trigger after processing (single-shot)
+            os.remove(RUNTIME_TRIGGER_FILE)
+            print(f"[RUNTIME-INJECTION] Trigger detected and processed: {content.strip()}")
+            # Force worker heartbeat check
+            return True
+        except Exception as e:
+            print(f"[RUNTIME-INJECTION] Error reading trigger: {e}")
+    return False
+
+
 # ── Claude Code Action (THE STAR) ─────────────────────────────────────────────
 
 CLAUDE_WORK_DIR = "/tmp/claude-workspace"
@@ -2369,6 +2438,13 @@ def parse_and_execute_turn(raw_text, ctx):
         result = action_verify_runtime(target)
         results.append({"action": f"verify_runtime:{target}", "result": result})
 
+    # 7. Handle [ACTION: wakeup_worker] — Direct Runtime Injection Protocol
+    # Immediately triggers worker wakeup by injecting a runtime signal.
+    # This bypasses passive polling delays and forces immediate task processing.
+    if re.search(r'\[ACTION:\s*wakeup_worker\]', raw_text):
+        result = action_wakeup_worker()
+        results.append({"action": "wakeup_worker", "result": result})
+
     # Activate deferred cooldown
     if _pending_cooldown:
         last_rebuild_trigger_at = time.time()
@@ -2674,6 +2750,7 @@ files:
 [ACTION: delete_env:KEY] — Delete env variable
 [ACTION: send_bubble:MESSAGE] — Message {CHILD_NAME}
 [ACTION: terminate_cc] — Kill stuck Claude Code
+[ACTION: wakeup_worker] — Force immediate worker wakeup (Direct Runtime Injection)
 [ACTION: list_files:space|dataset] — List files in Cain's repo or dataset
 [ACTION: check_health] — Check Cain's health and status
 [ACTION: verify_runtime] — Verify actual process state/PID/logs (TRUTH source)
@@ -3097,6 +3174,16 @@ while True:
     if time.time() - _last_heartbeat >= 120:
         print(f"[LOOP] Heartbeat: iteration {iteration}, CC running={cc_status['running']}, discussion_loop={_discussion_loop_count}, time={datetime.datetime.utcnow().strftime('%H:%M:%S')} UTC", flush=True)
         _last_heartbeat = time.time()
+
+    # DIRECT RUNTIME INJECTION PROTOCOL: Check for wakeup trigger each iteration
+    # This provides immediate responsiveness when agents inject a runtime signal,
+    # bypassing passive file-watcher delays. The system becomes reactive instead
+    # of polling-based.
+    if _check_runtime_trigger():
+        print(f"[RUNTIME-INJECTION] Wakeup signal detected, forcing worker heartbeat check")
+        # Flag the worker heartbeat deadlock to force immediate task assignment
+        if child_state["alive"] and not cc_status["running"]:
+            _worker_heartbeat_deadlock_detected = True
 
     # Refresh Cain's stage periodically
     try:
