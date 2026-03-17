@@ -324,12 +324,32 @@ def get_runtime_status():
 # ENGLISH PROTOCOL: All control flow must be in English to prevent semantic drift
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  LIVENESS & READINESS PROTOCOL — Split-Brain Prevention
+# ══════════════════════════════════════════════════════════════════════════════
+# Distinguishes between "Started" (Control Plane) and "Ready" (Data Plane).
+# Stage = HF API state (RUNNING, BUILDING, etc.) — Control Plane status
+# Status = Application readiness (BOOTSTRAPPING, READY, CRASHED) — Data Plane status
+# This prevents agents chasing "healthy but idle" ghost processes.
+#
+# Status values:
+#   - BOOTSTRAPPING: Process spawned, waiting for /healthz check
+#   - READY: Application event loop is running and responding
+#   - CRASHED: Process failed to become ready within timeout
+# ══════════════════════════════════════════════════════════════════════════════
+
+STATUS_BOOTSTRAPPING = "BOOTSTRAPPING"
+STATUS_READY = "READY"
+STATUS_CRASHED = "CRASHED"
+
 child_state = {
     "created": False,
     "alive": False,
     "stage": "not_born",
+    "status": STATUS_BOOTSTRAPPING,  # Data Plane readiness (vs stage = Control Plane)
     "state": "unknown",
     "detail": "",
+    "ready_since": 0.0,  # When status became READY (for crash detection)
 }
 
 # Rebuild cooldown — prevent rapid pushes that keep resetting builds
@@ -405,6 +425,90 @@ def _detect_chattering_loop():
         _last_chatter_keywords = set()
 
     return _chatter_detection_count >= _MAX_CHATTER_TURNS
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LIVENESS & READINESS — /healthz Polling for Split-Brain Prevention
+# ══════════════════════════════════════════════════════════════════════════════
+# Polls /healthz endpoint to verify application event loop is actually running.
+# This distinguishes "process exists" from "application is ready".
+#
+# Two-stage startup protocol:
+#   Stage 1: Spawn (HF API reports RUNNING) → Set status=BOOTSTRAPPING
+#   Stage 2: Ack (healthz returns 200) → Set status=READY
+#   Stage 2 timeout: Mark as CRASHED, force rapid trial-and-error fixes
+# ══════════════════════════════════════════════════════════════════════════════
+
+HEALTHZ_TIMEOUT = 60  # seconds to wait for healthz before marking as CRASHED
+_healthz_last_check = 0.0
+_healthz_check_interval = 10  # seconds between healthz polls
+
+def _check_healthz_readiness():
+    """Poll /healthz endpoint to verify application event loop is running.
+
+    Returns:
+        - True if application is READY (healthz returned 200)
+        - False if application is NOT ready (healthz failed / timeout / etc.)
+        - None if child not created or stage not RUNNING
+
+    This implements the two-stage startup protocol:
+    1. HF API reports RUNNING (Control Plane up) → status=BOOTSTRAPPING
+    2. healthz returns 200 (Data Plane ready) → status=READY
+    3. healthz fails for >HEALTHZ_TIMEOUT → status=CRASHED
+    """
+    global _healthz_last_check
+
+    # Only poll if child exists and HF API says RUNNING
+    if not child_state["created"]:
+        return None
+    if child_state["stage"] != "RUNNING":
+        return None
+
+    now = time.time()
+    # Rate limit healthz checks
+    if now - _healthz_last_check < _healthz_check_interval:
+        return child_state["status"] == STATUS_READY
+
+    _healthz_last_check = now
+
+    # Try /healthz endpoint for application-level health check
+    try:
+        resp = requests.get(f"{CHILD_SPACE_URL}/healthz", timeout=5)
+        if resp.ok:
+            # Health check passed - application event loop is running
+            if child_state["status"] != STATUS_READY:
+                print(f"[HEALTHZ] Application READY! Event loop confirmed running.")
+                child_state["status"] = STATUS_READY
+                child_state["ready_since"] = now
+            return True
+        else:
+            # Health check returned non-200
+            print(f"[HEALTHZ] Health check failed: HTTP {resp.status_code}")
+            return False
+    except Exception as e:
+        # Health check failed (connection error, timeout, etc.)
+        # This means the application event loop is NOT running despite HF API saying RUNNING
+        print(f"[HEALTHZ] Health check error: {e}")
+
+        # Check if we've exceeded the bootstrap timeout
+        if child_state["status"] == STATUS_BOOTSTRAPPING:
+            # Check if we've been bootstrapping too long
+            bootstrap_time = now - (child_state.get("ready_since") or now)
+            # If ready_since is 0, we just started bootstrapping
+            if child_state.get("ready_since", 0) == 0:
+                child_state["ready_since"] = now  # Mark bootstrap start time
+            else:
+                bootstrap_time = now - child_state["ready_since"]
+
+            if bootstrap_time > HEALTHZ_TIMEOUT:
+                print(f"[HEALTHZ] BOOTSTRAP TIMEOUT after {int(bootstrap_time)}s! Marking as CRASHED.")
+                child_state["status"] = STATUS_CRASHED
+                # Trigger circuit breaker to force rapid fixes
+                global _circuit_breaker_mode, _circuit_breaker_trigger_time
+                _circuit_breaker_mode = True
+                _circuit_breaker_trigger_time = now
+                return False
+
+        return False
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STATE-SYNCHRONIZATION PROTOCOL (Worker Heartbeat)
@@ -535,6 +639,13 @@ def check_and_clear_cooldown():
             last_rebuild_trigger_at = 0
             child_state["stage"] = stage
             child_state["alive"] = (stage == "RUNNING")
+            # Initialize status when clearing cooldown
+            if stage == "RUNNING":
+                child_state["status"] = STATUS_BOOTSTRAPPING
+                child_state["ready_since"] = time.time()
+            else:
+                child_state["status"] = STATUS_BOOTSTRAPPING
+                child_state["ready_since"] = 0.0
     except:
         pass
 
@@ -546,7 +657,14 @@ def init_child_state():
         child_state["stage"] = info.runtime.stage if info.runtime else "unknown"
         # Use HF API stage as source of truth for alive (stage==RUNNING means healthy)
         child_state["alive"] = (child_state["stage"] == "RUNNING")
-        print(f"[init] {CHILD_NAME}: stage={child_state['stage']}, alive={child_state['alive']}")
+        # Initialize status based on stage (RUNNING → BOOTSTRAPPING, awaiting /healthz)
+        if child_state["stage"] == "RUNNING":
+            child_state["status"] = STATUS_BOOTSTRAPPING
+            child_state["ready_since"] = time.time()
+        else:
+            child_state["status"] = STATUS_BOOTSTRAPPING
+            child_state["ready_since"] = 0.0
+        print(f"[init] {CHILD_NAME}: stage={child_state['stage']}, status={child_state['status']}, alive={child_state['alive']}")
     except:
         print(f"[init] {CHILD_NAME} does not exist yet")
 
@@ -582,6 +700,8 @@ def action_create_child():
         child_state["created"] = True
         child_state["stage"] = "BUILDING"
         child_state["alive"] = False  # LIFECYCLE HARDENING: BUILDING != alive
+        child_state["status"] = STATUS_BOOTSTRAPPING  # Will enter READY after /healthz succeeds
+        child_state["ready_since"] = 0.0
         print(f"[ACTION] Created {CHILD_NAME}!")
         return f"SUCCESS! {CHILD_NAME} born! Space: {CHILD_SPACE_ID}. Status: BUILDING."
     except Exception as e:
@@ -639,6 +759,8 @@ def action_restart():
         hf_api.restart_space(CHILD_SPACE_ID)
         child_state["alive"] = False  # LIFECYCLE: RESTARTING != alive
         child_state["stage"] = "RESTARTING"
+        child_state["status"] = STATUS_BOOTSTRAPPING  # Will enter READY after /healthz succeeds
+        child_state["ready_since"] = 0.0
         _pending_cooldown = True
         return f"{CHILD_NAME} is restarting."
     except Exception as e:
@@ -3291,11 +3413,12 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"DO NOT discuss architecture or theory. PLAN concrete work only — what exact [TASK] will you assign when CC finishes?")
     elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING", "RUNNING_APP_STARTING"):
         # ══════════════════════════════════════════════════════════════════════════════
-        #  SUPERVISED PROCESS ISOLATION: Detect stuck boot state (alive=False during start)
+        #  LIVENESS & READINESS: Detect stuck boot state (status=BOOTSTRAPPING for too long)
         # ══════════════════════════════════════════════════════════════════════════════
-        # If Cain is in RUNNING_APP_STARTING but alive=False, the event loop never started.
-        # This is a CRASH/HANG state, not normal boot. Agents must push rapid fixes.
-        is_stuck_boot = (child_state["stage"] == "RUNNING_APP_STARTING" and not child_state["alive"])
+        # If Cain's stage is RUNNING but status=BOOTSTRAPPING (not READY), the event loop
+        # never started. This is a CRASH/HANG state, not normal boot. Agents must push rapid fixes.
+        is_stuck_boot = (child_state["stage"] == "RUNNING" and child_state["status"] == STATUS_BOOTSTRAPPING)
+        is_crashed = (child_state["status"] == STATUS_CRASHED)
         # Check cooldown and inform agents
         check_and_clear_cooldown()
         cooldown_remaining = 0
@@ -3303,17 +3426,30 @@ def build_turn_message(speaker, other, ctx):
             elapsed = time.time() - last_rebuild_trigger_at
             cooldown_remaining = max(0, REBUILD_COOLDOWN_SECS - elapsed)
         if cooldown_remaining > 0:
-            parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. Cooldown active: {int(cooldown_remaining)}s remaining. Discuss plans but DO NOT assign [TASK] until cooldown ends.")
-        elif is_stuck_boot:
-            # STUCK BOOT DETECTED: alive=False during RUNNING_APP_STARTING = event loop never started
-            # Treat like ERROR state — agents must push rapid trial-and-error fixes
-            parts.append(f"\n🚨 CRITICAL: {CHILD_NAME} is {child_state['stage']} but alive=False!")
-            parts.append(f"This means Cain's event loop NEVER STARTED — the process spawned but crashed during boot.")
+            parts.append(f"\n{CHILD_NAME} is {child_state['stage']} (status: {child_state['status']}). Cooldown active: {int(cooldown_remaining)}s remaining. Discuss plans but DO NOT assign [TASK] until cooldown ends.")
+        elif is_crashed:
+            # CRASHED: Bootstrap timeout exceeded - /healthz never responded
+            # Treat like RUNTIME_ERROR — agents must push rapid trial-and-error fixes
+            parts.append(f"\n🚨 CRITICAL: {CHILD_NAME} is {child_state['stage']} but status=CRASHED!")
+            parts.append(f"This means Cain's event loop NEVER STARTED — the process spawned but /healthz never responded.")
             parts.append(f"\n🔴 This is a CRASH/HANG state, not normal boot. Treat it like RUNTIME_ERROR.")
             parts.append(f"- DO NOT discuss architecture or theory.")
             parts.append(f"- Push a fix attempt EVERY cycle — trial-and-error, not deliberation.")
             parts.append(f"- Use [ACTION: restart] if you pushed a fix and it's still stuck.")
             parts.append(f"Pushes so far: {_push_count} total, {_push_count_this_task} this task. Turns since last push: {_turns_since_last_push}. PUSH MORE.")
+        elif is_stuck_boot:
+            # STUCK BOOT DETECTED: status=BOOTSTRAPPING means /healthz hasn't confirmed readiness
+            # Show bootstrap time to help agents understand how long we've been waiting
+            bootstrap_time = int(time.time() - child_state.get("ready_since", time.time()))
+            parts.append(f"\n⚠️ BOOTSTRAPPING: {CHILD_NAME} is {child_state['stage']} but status=BOOTSTRAPPING (waiting for /healthz, {bootstrap_time}s elapsed).")
+            parts.append(f"This is the two-stage startup protocol: Control Plane is RUNNING, waiting for Data Plane (/healthz) to confirm readiness.")
+            if bootstrap_time > 30:
+                parts.append(f"\n🚨 Bootstrap taking longer than expected ({bootstrap_time}s). This may indicate a crash during boot.")
+                parts.append(f"- If this persists past {HEALTHZ_TIMEOUT}s, the system will mark as CRASHED.")
+                parts.append(f"- Consider pushing a fix to check what's blocking the event loop.")
+            else:
+                parts.append(f"- Normal boot: Wait for /healthz check to confirm readiness.")
+                parts.append(f"- Do NOT assign [TASK] yet — let the boot process complete.")
         else:
             parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. No cooldown. YOU MUST write a [TASK]...[/TASK] to investigate or fix issues. Don't just discuss.")
         # Add recent task reminder during cooldown/building
@@ -3750,7 +3886,7 @@ def build_god_turn_message(ctx):
     # System overview
     parts.append(f"\n## System State")
     parts.append(f"- Turn count: {turn_count}, Workflow: {workflow_state}")
-    parts.append(f"- Child ({CHILD_NAME}): stage={child_state['stage']}, alive={child_state['alive']}")
+    parts.append(f"- Child ({CHILD_NAME}): stage={child_state['stage']}, status={child_state['status']}, alive={child_state['alive']}")
     parts.append(f"- A2A health: Adam={_a2a_health['adam']['failures']} failures, Eve={_a2a_health['eve']['failures']} failures")
 
     # CC status (high-level)
@@ -3912,6 +4048,20 @@ while True:
             print(f"[STATUS] {child_state['stage']} → {new_stage}")
             child_state["stage"] = new_stage
             # ══════════════════════════════════════════════════════════════════════════════
+            #  LIVENESS & READINESS: Two-Stage Startup Protocol
+            # ══════════════════════════════════════════════════════════════════════════════
+            # Stage 1: Spawn (HF API reports RUNNING) → Set status=BOOTSTRAPPING
+            # Stage 2: Ack (healthz returns 200) → Set status=READY
+            # This prevents "split-brain" where Control Plane says RUNNING but Data Plane is dead
+            if new_stage == "RUNNING":
+                child_state["status"] = STATUS_BOOTSTRAPPING
+                child_state["ready_since"] = time.time()  # Mark bootstrap start time
+                print(f"[HEALTHZ] Stage RUNNING → Entering BOOTSTRAPPING mode (waiting for /healthz)")
+            else:
+                # Reset status for non-RUNNING stages
+                child_state["status"] = STATUS_BOOTSTRAPPING
+                child_state["ready_since"] = 0.0
+            # ══════════════════════════════════════════════════════════════════════════════
             #  SUPERVISED PROCESS ISOLATION: Check Control Plane AND Data Plane
             # ══════════════════════════════════════════════════════════════════════════════
             # HF stage == "RUNNING" means Control Plane (App) is responsive
@@ -3929,6 +4079,24 @@ while True:
             publish_child_stage_changed(old_stage, new_stage, child_state["alive"])
     except Exception as e:
         print(f"[STATUS] Error: {e}")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  LIVENESS & READINESS: Periodic /healthz polling when stage=RUNNING
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Poll /healthz endpoint to verify application event loop is actually running.
+    # This implements the two-stage startup protocol and detects "ghost processes".
+    if child_state["stage"] == "RUNNING":
+        try:
+            is_ready = _check_healthz_readiness()
+            if is_ready is False and child_state["status"] == STATUS_BOOTSTRAPPING:
+                # Still bootstrapping - healthz check failed
+                bootstrap_time = int(time.time() - child_state.get("ready_since", time.time()))
+                print(f"[HEALTHZ] Still bootstrapping after {bootstrap_time}s...")
+            elif is_ready is True:
+                # Application is ready
+                print(f"[HEALTHZ] Application confirmed READY (event loop running)")
+        except Exception as e:
+            print(f"[HEALTHZ] Error during readiness check: {e}")
 
     # Check Adam/Eve health and restart if needed
     try:
