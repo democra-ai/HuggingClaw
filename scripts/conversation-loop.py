@@ -3278,10 +3278,23 @@ def format_action_history():
 # Simple workflow state: BIRTH / ACTIVE / ESCALATED
 workflow_state = "BIRTH" if not child_state["created"] else "ACTIVE"
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYSTEM_CIRCUIT_BREAKER — Consecutive Analysis Loop Detection
+# ══════════════════════════════════════════════════════════════════════════════
+# When alive=False persists, agents should stop analyzing and start culling.
+# This protocol prevents "analysis paralysis" — agents discussing when they should
+# be pushing rapid infrastructure fixes (docker restart, kill zombie process).
+_circuit_breaker_triggered = False  # Set to True when alive=False > 1 turn in BOOTSTRAPPING
+_circuit_breaker_turn_count = 0  # How many turns since circuit breaker triggered
+
 def _update_workflow_state():
     """Update workflow state based on circuit breaker status."""
     global workflow_state, _escalated
-    workflow_state = "ESCALATED" if _escalated else ("BIRTH" if not child_state["created"] else "ACTIVE")
+    # CIRCUIT BREAKER: Freeze to CRITICAL_FAILURE when alive=False persists
+    if _circuit_breaker_triggered:
+        workflow_state = "CRITICAL_FAILURE"
+    else:
+        workflow_state = "ESCALATED" if _escalated else ("BIRTH" if not child_state["created"] else "ACTIVE")
 
 # Discussion loop detector — tracks consecutive discussion-only turns (no tasks assigned)
 _discussion_loop_count = 0  # how many turns in a row with no [TASK] while CC is IDLE and child is alive
@@ -3712,6 +3725,8 @@ def build_turn_message(speaker, other, ctx):
     global _worker_heartbeat_deadlock_detected, _read_only_verification_required, _file_claims
     global _verification_override_mode, _turns_since_last_verification
     global _force_push_mode, _force_push_skip_termination, _emergency_override_active
+    global _turns_since_alive_false, _logs_inaccessible_count
+    global _circuit_breaker_triggered, _circuit_breaker_turn_count
     parts = []
 
     # Brief role context (supplements agent's SOUL.md until it's fully configured)
@@ -3729,6 +3744,24 @@ def build_turn_message(speaker, other, ctx):
     parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
     parts.append(f"⛔ BANNED: Gradio. {CHILD_NAME}'s Space uses sdk:docker + FastAPI + uvicorn on port 7860. NEVER mention or use Gradio/gr.Interface/.launch().")
     parts.append(f"⛔ BANNED: UI/Frontend fixes. Fix SYSTEM STATE, not visualization. The UI reflects state; fix the schema.")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  SYSTEM_CIRCUIT_BREAKER — Stop analyzing, start culling
+    # ══════════════════════════════════════════════════════════════════════════════
+    # When alive=False persists > 1 turn during BOOTSTRAPPING, force immediate action.
+    # This protocol prevents "analysis paralysis" — agents discussing when they should
+    # push rapid infrastructure fixes (docker restart, kill zombie process).
+    global _circuit_breaker_triggered, _circuit_breaker_turn_count, _turns_since_alive_false
+    if _circuit_breaker_triggered:
+        parts.append(f"\n🚨🚨🚨 [HARD_RESET] CIRCUIT BREAKER TRIGGERED 🚨🚨🚨")
+        parts.append(f"alive=False for {_turns_since_alive_false} turns during BOOTSTRAPPING (child: {child_state['status']}).")
+        parts.append(f"\n🛑 STOP ANALYZING. START CULLING.")
+        parts.append(f"\n[SYS_OVERRIDE] directive: Force container stop/start cycle IMMEDIATELY.")
+        parts.append(f"\nREQUIRED ACTION (execute NOW):")
+        parts.append(f"- [ACTION: restart] — Force restart the Space to kill zombie process")
+        parts.append(f"\n🛑 DO NOT discuss. DO NOT write [TASK]. DO NOT analyze.")
+        parts.append(f"Use [ACTION: restart] immediately. Trial-and-error is GOOD.")
+        return "\n".join(parts)
 
     # FILE CLAIM PROTOCOL — Prevents both agents from editing the same file simultaneously
     if _file_claims:
@@ -3856,7 +3889,6 @@ def build_turn_message(speaker, other, ctx):
     # When the container is dead (alive=False), NO code modifications allowed.
     # Only INSPECT (logs) or RESTART (infrastructure) actions permitted.
     # This prevents agents from speculating on code changes when the process is dead.
-    global _turns_since_alive_false, _logs_inaccessible_count
     if not child_state["alive"]:
         parts.append(f"\n🛑🛑🛑 EVIDENCE-BASED ROUTING: CONTAINER DEAD (alive=False) 🛑🛑🛑")
         parts.append(f"The child container is NOT RUNNING. Code modifications are FORBIDDEN.")
@@ -4324,6 +4356,7 @@ def do_turn(speaker, other, space_url):
     #  REMOTE FORENSICS PROTOCOL: Track alive=False turns for docker restart
     # ══════════════════════════════════════════════════════════════════════════════
     # Increment counter when alive=False, reset when alive=True
+    global _circuit_breaker_triggered, _circuit_breaker_turn_count
     if not child_state["alive"]:
         _turns_since_alive_false += 1
         # Check if logs are inaccessible (no runtime_logs and no failure_report)
@@ -4332,9 +4365,25 @@ def do_turn(speaker, other, space_url):
             _logs_inaccessible_count += 1
         else:
             _logs_inaccessible_count = 0  # Reset if logs become accessible
+
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  SYSTEM_CIRCUIT_BREAKER — Stop analyzing, start culling
+        # ══════════════════════════════════════════════════════════════════════════════
+        # Trigger circuit breaker if alive=False > 1 turn during BOOTSTRAPPING
+        # This prevents "analysis paralysis" — agents discussing when they should push
+        # rapid infrastructure fixes (docker restart, kill zombie process).
+        is_bootstrapping = child_state["status"] == STATUS_BOOTSTRAPPING
+        if is_bootstrapping and _turns_since_alive_false > 1:
+            if not _circuit_breaker_triggered:
+                print(f"[CIRCUIT-BREAKER] TRIGGERED: alive=False for {_turns_since_alive_false} turns during BOOTSTRAPPING")
+                print(f"[CIRCUIT-BREAKER] FREEZING workflow to CRITICAL_FAILURE, forcing [SYS_OVERRIDE]")
+            _circuit_breaker_triggered = True
+            _circuit_breaker_turn_count += 1
     else:
         _turns_since_alive_false = 0  # Reset when alive=True
         _logs_inaccessible_count = 0
+        _circuit_breaker_triggered = False  # Reset circuit breaker when alive=True
+        _circuit_breaker_turn_count = 0
 
     # ══════════════════════════════════════════════════════════════════════════════
     #  POST_MORTEM_STACKTRACE: Increment turn counter if in APP_STARTING
