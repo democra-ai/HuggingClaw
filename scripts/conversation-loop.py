@@ -308,6 +308,53 @@ _turns_since_last_verification = 0  # Tracks turns without verification tool use
 MAX_SPECULATION_TURNS = 3  # Trigger verification override after this many speculation turns
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  CIRCUIT BREAKER PROTOCOL — Halts diagnostic loops, forces container reset
+# ══════════════════════════════════════════════════════════════════════════════
+# Trigger: Repeated `.env` or port discussion patterns without verification/action
+# Action: HALT diagnostic loop, FORCE container reset, VERIFY with health check
+_circuit_breaker_mode = False  # When True, force container reset, halt diagnostics
+_circuit_breaker_trigger_time = 0.0  # When CIRCUIT_BREAKER was triggered
+_chatter_keywords = [".env", "port", "bind", "listening", "environment variable", "env var"]
+_MAX_CHATTER_TURNS = 5  # Trigger after this many turns with chatter keywords
+_chatter_detection_count = 0  # Tracks consecutive turns with chatter patterns
+_last_chatter_keywords = set()  # Tracks which keywords were seen (for deduplication)
+
+def _detect_chattering_loop():
+    """Detect if agents are stuck in `.env` or port discussion loop."""
+    global _chatter_detection_count, _last_chatter_keywords
+    if not history or len(history) < 3:
+        _chatter_detection_count = 0
+        return False
+
+    # Check last 3 turns for chatter keywords
+    recent_text = " ".join(h.get("text", "").lower() for h in history[-3:])
+    found_keywords = set(kw for kw in _chatter_keywords if kw.lower() in recent_text)
+
+    # Check if there's speculation WITHOUT verification tools
+    has_verification = any("verify_runtime" in h.get("text", "").lower() or "verify" in h.get("text", "").lower()
+                          for h in history[-3:])
+    has_task = any("[TASK]" in h.get("text", "") for h in history[-3:])
+
+    # Chattering detected: keywords present, no verification, no task assignment
+    is_chattering = bool(found_keywords) and not has_verification and not has_task
+
+    if is_chattering:
+        # Only increment if NEW keywords detected (avoid repeated counts for same topic)
+        new_keywords = found_keywords - _last_chatter_keywords
+        if new_keywords or not _last_chatter_keywords:
+            _chatter_detection_count += 1
+            _last_chatter_keywords = found_keywords
+            print(f"[CIRCUIT-BREAKER] Chatter detected: {found_keywords}, count={_chatter_detection_count}/{_MAX_CHATTER_TURNS}")
+    else:
+        # Reset if genuine discussion or action detected
+        if _chatter_detection_count > 0:
+            print(f"[CIRCUIT-BREAKER] Reset: genuine discussion/action detected")
+        _chatter_detection_count = 0
+        _last_chatter_keywords = set()
+
+    return _chatter_detection_count >= _MAX_CHATTER_TURNS
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  STATE-SYNCHRONIZATION PROTOCOL (Worker Heartbeat)
 # ══════════════════════════════════════════════════════════════════════════════
 # Protocol: IF Worker == IDLE AND Cain == RUNNING THEN TASK = [FORCE_WORKER_WAKE]
@@ -3132,6 +3179,21 @@ RULES:
         parts.append(f"DO NOT discuss. DO NOT plan. Write task ONLY.")
         parts.append(f"SYSTEM OVERRIDE: PLANNING SUSPENDED. EXECUTE PUSH NOW.")
 
+    # CIRCUIT BREAKER PROTOCOL: HALT `.env`/port chattering, force container reset
+    # Triggered when agents stuck in `.env` or port discussion loop without verification
+    global _circuit_breaker_mode
+    if _circuit_breaker_mode:
+        parts.append(f"\n🚨🚨🚨 CIRCUIT BREAKER: HALT DIAGNOSTIC LOOP 🚨🚨🚨")
+        parts.append(f"System detected repeated `.env` or port discussion WITHOUT action.")
+        parts.append(f"HALT: STOP ALL `.env` and port speculation immediately.")
+        parts.append(f"FORCE RESET: Container must be hard-reset to clear zombie processes.")
+        parts.append(f"VERIFICATION: Post-restart, execute HTTP health check immediately.")
+        parts.append(f"REQUIRED ACTION this turn:")
+        parts.append(f"1. FIRST: Use [ACTION: restart] to force container hard reset")
+        parts.append(f"2. THEN: Use [ACTION: check_health] to verify instrumentation")
+        parts.append(f"DO NOT discuss. DO NOT analyze. EXECUTE RESET NOW.")
+        parts.append(f"SYSTEM OVERRIDE: DIAGNOSTIC LOOP BROKEN. EXECUTE RESET NOW.")
+
     return "\n".join(parts)
 
 
@@ -3607,6 +3669,51 @@ while True:
         _force_push_mode = False
         _emergency_override_active = False
         _force_push_skip_termination = False
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  CIRCUIT BREAKER PROTOCOL — Halts `.env`/port chattering, forces reset
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Trigger: Agents stuck in `.env` or port discussion loop without verification
+    # Action: HALT diagnostic loop, FORCE container hard reset, VERIFY health
+    # Note: Module-level variables are accessible without 'global' in main loop
+    if not _circuit_breaker_mode and not _force_push_mode:
+        if _detect_chattering_loop():
+            print(f"[CIRCUIT-BREAKER] TRIGGERED: {_chatter_detection_count} turns of `.env`/port chattering!")
+            _circuit_breaker_mode = True
+            _circuit_breaker_trigger_time = time.time()
+            # Clear context to break the loop
+            _context_cache.clear()
+            # Reset counters to prevent re-trigger
+            _chatter_detection_count = 0
+            _last_chatter_keywords = set()
+
+    # Reset CIRCUIT_BREAKER mode after 3 minutes (safety valve)
+    if _circuit_breaker_mode and time.time() - _circuit_breaker_trigger_time > 180:
+        print(f"[CIRCUIT-BREAKER] Mode timeout (180s), resetting to normal")
+        _circuit_breaker_mode = False
+
+    # CIRCUIT BREAKER AUTO-EXECUTION: Force restart when triggered and CC idle
+    # This ensures the reset happens immediately without waiting for agent turn
+    if _circuit_breaker_mode and not cc_status["running"] and child_state["created"]:
+        elapsed = time.time() - _circuit_breaker_trigger_time
+        # Auto-execute on first trigger (within 10 seconds) to break the loop immediately
+        if elapsed < 10:
+            print(f"[CIRCUIT-BREAKER] AUTO-EXECUTE: Forcing container hard reset...")
+            ctx = gather_context()
+            try:
+                # Execute restart action
+                restart_result = action_restart()
+                print(f"[CIRCUIT-BREAKER] Restart executed: {restart_result}")
+                # Schedule health check in 30 seconds
+                parts = []
+                parts.append(f"[CIRCUIT-BREAKER] Container hard reset initiated.")
+                parts.append(f"Health check will be performed in 30 seconds.")
+                print(f"[CIRCUIT-BREAKER] {' '.join(parts)}")
+                # Clear mode after action taken
+                _circuit_breaker_mode = False
+                _chatter_detection_count = 0
+            except Exception as e:
+                print(f"[CIRCUIT-BREAKER] Auto-execution failed: {e}")
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
