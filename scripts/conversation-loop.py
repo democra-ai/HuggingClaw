@@ -2445,12 +2445,14 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"\n🚨 WORKER HEARTBEAT PROTOCOL ACTIVE 🚨")
             parts.append(f"State mismatch detected: Child is RUNNING but Worker is IDLE.")
             parts.append(f"You MUST assign a [TASK]...[/TASK] this turn. DO NOT just discuss.")
+            parts.append(f"\n🛑 HALT DIAGNOSTIC LOOP: Do NOT run generic RECOVERY or LOG_READ tasks.")
+            parts.append(f"If worker fails while API succeeds, this is an ENVIRONMENT CONFIGURATION issue.")
             if speaker == "Eve":
-                parts.append(f"**Eve**: Trigger a diagnostic task. Use [ACTION: list_files:space] or [ACTION: check_health] first.")
-                parts.append(f"Then write [TASK] with specific file to verify and fix.")
+                parts.append(f"**Eve**: Focus on .env inspection and startup arguments. Use [ACTION: list_files:space] to check .env file.")
+                parts.append(f"Identify missing dependencies (API keys, tokens). Write [TASK] to inject required environment variables.")
             else:  # Adam
-                parts.append(f"**Adam**: Execute read-only verification. Use [ACTION: list_files:space] to check current state.")
-                parts.append(f"Post the EXACT file content. Do NOT propose fixes until verified.")
+                parts.append(f"**Adam**: Inspect .env configuration and worker startup arguments. Use [ACTION: list_files:space] to check environment.")
+                parts.append(f"Post EXACT .env content. Identify missing API keys or tokens preventing worker initialization.")
     else:
         if recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
@@ -2985,12 +2987,13 @@ while True:
         print(f"[RECOVERY] Both agents have 10+ failures (adam={_a2a_health['adam']['failures']}, eve={_a2a_health['eve']['failures']}). Resetting failure counters to allow recovery after Space restarts.")
         _a2a_health["adam"]["failures"] = 0
         _a2a_health["eve"]["failures"] = 0
-        # If CC is idle and Cain exists, force a diagnostic task to break the deadlock
+        # If CC is idle and Cain exists, force environment configuration task (NOT generic diagnostics)
+        # HALT DIAGNOSTIC LOOP: Worker fails while API succeeds = environment issue, not health check needed
         if not cc_status["running"] and child_state["created"]:
-            print(f"[RECOVERY] Forcing diagnostic task to break communication deadlock")
+            print(f"[RECOVERY] Forcing environment configuration task - HALT DIAGNOSTIC LOOP")
             ctx = gather_context()
-            forced_task = "Emergency diagnostic: A2A communication is failing. Check Cain's health, logs, and state. List any errors and suggest fixes."
-            cc_submit_task(forced_task, "RECOVERY", ctx)
+            forced_task = "ENV_INJECTION: Worker initialization fails while API succeeds. Inspect .env configuration and startup arguments. Identify missing API keys or tokens (e.g., CLAUDE_API_KEY). Inject required environment variables or modify startup command. Do NOT run generic health checks or log reads - focus on env configuration."
+            cc_submit_task(forced_task, "ENV_INJECTION", ctx)
 
     # God runs every GOD_POLL_INTERVAL seconds (2 minutes)
     # Only start if not already running (prevent overlapping runs)
