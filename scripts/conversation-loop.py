@@ -1245,7 +1245,8 @@ def action_claude_code(task):
 
 cc_live_lines = deque(maxlen=30)    # rolling window of CC output lines
 cc_status = {"running": False, "task": "", "result": "", "assigned_by": "", "started": 0.0,
-             "last_completed_task": "", "last_completed_by": "", "last_completed_at": 0.0}
+             "last_completed_task": "", "last_completed_by": "", "last_completed_at": 0.0,
+             "verification_result": ""}
 cc_lock = threading.Lock()
 _last_cc_snapshot = ""              # tracks whether CC output changed between turns
 _cc_stale_count = 0                 # how many turns CC output hasn't changed
@@ -1270,6 +1271,7 @@ def cc_submit_task(task, assigned_by, ctx):
         cc_status["last_completed_task"] = last_completed_task
         cc_status["last_completed_by"] = last_completed_by
         cc_status["last_completed_at"] = last_completed_at
+        cc_status["verification_result"] = ""
         cc_live_lines.clear()
         global _last_cc_output_time, _push_count_this_task
         _last_cc_output_time = time.time()  # Initialize to now, will update as we get output
@@ -1279,7 +1281,7 @@ def cc_submit_task(task, assigned_by, ctx):
     print(f"[TASK] {assigned_by} assigned to Claude Code ({len(enriched)} chars)...")
 
     def worker():
-        global _cc_stale_count, _last_cc_snapshot
+        global _cc_stale_count, _last_cc_snapshot, _context_cache
         result = action_claude_code(enriched)
         with cc_lock:
             cc_status["running"] = False
@@ -1292,6 +1294,26 @@ def cc_submit_task(task, assigned_by, ctx):
             _cc_stale_count = 0
             _last_cc_snapshot = ""
         print(f"[CC-DONE] Task from {assigned_by} finished ({len(result)} chars)")
+
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  STATE SYNCHRONIZATION & ENGLISH PROTOCOL ENFORCEMENT
+        # ══════════════════════════════════════════════════════════════════════════════
+        # After any action, immediately verify the new state to break speculation loops.
+        # This prevents agents from operating on stale snapshots of reality.
+        # Key: Push → Verify → Update belief state. No more guessing in the dark.
+        global _push_count_this_task
+        if _push_count_this_task > 0:
+            print(f"[STATE-SYNC] Push detected ({_push_count_this_task} change(s)), verifying new state...")
+            # Force immediate health check to get fresh state
+            verification = action_check_health()
+            # Clear context cache so next turn gets fresh data
+            _context_cache.clear()
+            with cc_lock:
+                cc_status["verification_result"] = verification
+            print(f"[STATE-SYNC] Verification complete: {verification[:150]}...")
+        else:
+            with cc_lock:
+                cc_status["verification_result"] = ""
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
@@ -1537,8 +1559,12 @@ def cc_get_live_status():
             early_failure_warning = ""
             if len(result) < 500 and "===" not in result and "[tool" not in result:
                 early_failure_warning = "\n⚠️ EARLY FAILURE: Result is very short - CC likely failed during initialization. Consider re-assigning the task."
+            # Include state verification result if available (Push → Verify → Update)
+            verification_suffix = ""
+            if cc_status.get("verification_result"):
+                verification_suffix = f"\n🔍 STATE VERIFICATION (immediate check after push):\n{cc_status['verification_result']}"
             return (f"✅ Claude Code FINISHED (assigned by {cc_status['assigned_by']}){early_failure_warning}\n"
-                    f"Result:\n{result[:1500]}")
+                    f"Result:\n{result[:1500]}{verification_suffix}")
         else:
             return "💤 Claude Code is IDLE — no active task."
 
