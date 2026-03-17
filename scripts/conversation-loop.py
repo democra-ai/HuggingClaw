@@ -341,6 +341,7 @@ def get_runtime_status():
 STATUS_BOOTSTRAPPING = "BOOTSTRAPPING"
 STATUS_READY = "READY"
 STATUS_CRASHED = "CRASHED"
+STATUS_DIAGNOSTIC_PAUSE = "DIAGNOSTIC_PAUSE"  # Crash Loop Backoff: pause to ingest failure data before restart
 
 child_state = {
     "created": False,
@@ -378,6 +379,159 @@ _verification_override_mode = False  # When True, agents MUST use verification t
 _verification_override_trigger_time = 0.0  # When VERIFICATION_OVERRIDE was triggered
 _turns_since_last_verification = 0  # Tracks turns without verification tool use
 MAX_SPECULATION_TURNS = 3  # Trigger verification override after this many speculation turns
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CRASH LOOP BACKOFF & LOG SCRAPING PIPELINE — Autonomic Recovery
+# ══════════════════════════════════════════════════════════════════════════════
+# Shifts from "Supervised Debugging" to "Autonomic Recovery" by capturing and
+# ingesting structured failure data (STDERR, exit code, traceback) before restart.
+#
+# Data Flow: Container Crash → FailureReport → Context Injection → Planning Cycle
+# Recovery Protocol: alive==False → DIAGNOSTIC_PAUSE → Ingest Report → RESTART
+# ══════════════════════════════════════════════════════════════════════════════
+
+_failure_report = None  # Structured FailureReport object (traceback, signal, last 3 lines)
+_failure_report_timestamp = 0.0  # When the failure report was captured
+_crash_loop_backoff_count = 0  # Tracks consecutive crashes (exponential backoff)
+_max_crash_retries = 5  # Maximum consecutive crash attempts before manual intervention
+
+
+class FailureReport:
+    """Structured failure data captured when container exits with code 1.
+
+    This shifts the system from "Supervised Debugging" (agents guessing) to
+    "Autonomic Recovery" (agents reacting to grounded failure data).
+
+    Attributes:
+        exit_code: Container exit code (1 for crash)
+        signal: Signal that killed the process (if any)
+        traceback: Python traceback extracted from STDERR
+        last_3_lines: Last 3 lines of logs before crash (context)
+        timestamp: When the failure was captured
+        stage: What stage the container was in when it crashed
+    """
+
+    def __init__(self, exit_code: int, stderr: str, stage: str, timestamp: float):
+        self.exit_code = exit_code
+        self.signal = None  # Extract from stderr if present
+        self.traceback = self._extract_traceback(stderr)
+        self.last_3_lines = self._extract_last_3_lines(stderr)
+        self.raw_stderr = stderr[-1000:] if stderr else ""  # Last 1KB for context
+        self.timestamp = timestamp
+        self.stage = stage
+
+    def _extract_traceback(self, stderr: str) -> str:
+        """Extract Python traceback from STDERR."""
+        if not stderr:
+            return ""
+        lines = stderr.split('\n')
+        traceback_lines = []
+        in_traceback = False
+        for line in lines:
+            if 'Traceback (most recent call last)' in line:
+                in_traceback = True
+            if in_traceback:
+                traceback_lines.append(line)
+                if line.strip().startswith(('Error:', 'Exception:', 'File')) and ':' in line:
+                    # End of traceback
+                    break
+        return '\n'.join(traceback_lines[-20:]) if traceback_lines else ""
+
+    def _extract_last_3_lines(self, stderr: str) -> str:
+        """Extract last 3 non-empty lines before crash."""
+        if not stderr:
+            return ""
+        lines = [l.strip() for l in stderr.split('\n') if l.strip()]
+        return '\n'.join(lines[-3:]) if len(lines) >= 3 else '\n'.join(lines)
+
+    def format_for_context(self) -> str:
+        """Format failure report for injection into agent context."""
+        parts = [
+            "╔══════════════════════════════════════════════════════════════════════════╗",
+            "║           CRASH LOOP BACKOFF — FAILURE REPORT (Structured Data)           ║",
+            "╚══════════════════════════════════════════════════════════════════════════╝",
+            f"EXIT CODE: {self.exit_code}",
+            f"STAGE: {self.stage}",
+            f"TIMESTAMP: {self.timestamp}",
+        ]
+        if self.signal:
+            parts.append(f"SIGNAL: {self.signal}")
+        if self.traceback:
+            parts.append(f"\n=== TRACEBACK ===\n{self.traceback}")
+        parts.append(f"\n=== LAST 3 LINES ===\n{self.last_3_lines}")
+        return '\n'.join(parts)
+
+
+def capture_failure_report() -> FailureReport | None:
+    """Capture structured failure data when container exits with code 1.
+
+    This is the "Data Source (Shard)" of the Log Scraping Pipeline.
+    It fetches Docker logs via /api/logs endpoint and normalizes them
+    into a structured FailureReport object.
+
+    Returns:
+        FailureReport object if capture succeeded, None otherwise
+    """
+    global _failure_report, _failure_report_timestamp
+
+    if not child_state["created"]:
+        return None
+
+    # Only capture for error states
+    if child_state["stage"] not in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
+        return None
+
+    try:
+        # Fetch logs from /api/logs endpoint (Docker stdout/stderr)
+        resp = requests.get(f"{CHILD_SPACE_URL}/api/logs", timeout=10)
+        if not resp.ok:
+            print(f"[CRASH-LOOP] Failed to fetch logs: HTTP {resp.status_code}")
+            return None
+
+        data = resp.json()
+        stderr = data.get("logs", "")
+        if not stderr:
+            print(f"[CRASH-LOOP] No logs available from /api/logs")
+            return None
+
+        # Extract exit code from HF API if available
+        exit_code = 1  # Default for error states
+        try:
+            rresp = requests.get(
+                f"https://huggingface.co/api/spaces/{CHILD_SPACE_ID}/runtime",
+                headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=10)
+            if rresp.ok:
+                rdata = rresp.json()
+                error_detail = rdata.get("errorMessage", "")
+                if error_detail:
+                    stderr = error_detail + "\n\n" + stderr  # Prepend HF error message
+        except Exception as e:
+            print(f"[CRASH-LOOP] Could not fetch HF runtime error: {e}")
+
+        # Create structured FailureReport
+        report = FailureReport(
+            exit_code=exit_code,
+            stderr=stderr,
+            stage=child_state["stage"],
+            timestamp=time.time()
+        )
+
+        # Cache the report for context injection
+        _failure_report = report
+        _failure_report_timestamp = time.time()
+
+        print(f"[CRASH-LOOP] Captured FailureReport:")
+        print(f"  - Exit code: {report.exit_code}")
+        print(f"  - Stage: {report.stage}")
+        print(f"  - Traceback: {len(report.traceback)} chars")
+        print(f"  - Last 3 lines: {len(report.last_3_lines)} chars")
+
+        return report
+
+    except Exception as e:
+        print(f"[CRASH-LOOP] Error capturing failure report: {e}")
+        return None
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CIRCUIT BREAKER PROTOCOL — Halts diagnostic loops, forces container reset
@@ -2265,6 +2419,13 @@ def gather_context():
             event_summary.append(f"{e['type']}: {str(e.get('data', ''))[:100]}")
         ctx["recent_events"] = "\n".join(event_summary[-10:])  # Last 10 events
 
+    # 7. CRASH LOOP BACKOFF: Inject FailureReport if container crashed
+    # This is the "Memory Interface" — ingests FailureReport into Agent Context
+    # before the next planning cycle, shifting from guessing to grounded data
+    if _failure_report is not None:
+        ctx["failure_report"] = _failure_report.format_for_context()
+        ctx["has_failure_report"] = True
+
     return ctx
 
 
@@ -2359,6 +2520,11 @@ def format_context(ctx):
         for key, value in ctx["api_probe"].items():
             parts.append(f"{key}: {value}")
         parts.append(f"\n🚨 ABOVE IS VERIFIED API STATUS. Adam: Read this ground truth instead of asking Eve about endpoints.")
+
+    # Inject FailureReport from Crash Loop Backoff — structured error data for grounded diagnosis
+    if ctx.get("failure_report"):
+        parts.append(f"\n{ctx['failure_report']}")
+        parts.append(f"\n🚨 ABOVE IS STRUCTURED FAILURE DATA. Adam: Use this traceback and error info to diagnose, don't guess!")
 
     return "\n".join(parts)
 
@@ -4186,6 +4352,34 @@ while True:
             _context_cache.clear()
             # Publish CHILD_STAGE_CHANGED event for real-time status
             publish_child_stage_changed(old_stage, new_stage, child_state["alive"])
+
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  CRASH LOOP BACKOFF — Recovery Protocol: Trigger on alive==False
+            # ══════════════════════════════════════════════════════════════════════════════
+            # When alive becomes False (container crash), force DIAGNOSTIC_PAUSE state,
+            # capture FailureReport, then trigger restart workflow.
+            if not child_state["alive"] and child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR"):
+                print(f"[CRASH-LOOP] Container crash detected! Triggering Recovery Protocol...")
+                print(f"[CRASH-LOOP] 1. Force DIAGNOSTIC_PAUSE state")
+                child_state["status"] = STATUS_DIAGNOSTIC_PAUSE
+
+                # Capture failure report (Data Source: fetch Docker logs)
+                print(f"[CRASH-LOOP] 2. Capture FailureReport from Docker logs")
+                report = capture_failure_report()
+                if report:
+                    print(f"[CRASH-LOOP] 3. FailureReport captured, injecting into context...")
+                    _crash_loop_backoff_count += 1
+                    if _crash_loop_backoff_count <= _max_crash_retries:
+                        print(f"[CRASH-LOOP] 4. Triggering restart workflow (attempt {_crash_loop_backoff_count}/{_max_crash_retries})...")
+                        # Trigger restart after brief pause for report ingestion
+                        time.sleep(2)  # Brief pause for context injection
+                        try:
+                            hf_api.restart_space(CHILD_SPACE_ID)
+                            print(f"[CRASH-LOOP] Restart triggered successfully")
+                        except Exception as e:
+                            print(f"[CRASH-LOOP] Restart failed: {e}")
+                    else:
+                        print(f"[CRASH-LOOP] 5. Max retries ({_max_crash_retries}) exceeded! Manual intervention required.")
     except Exception as e:
         print(f"[STATUS] Error: {e}")
 
