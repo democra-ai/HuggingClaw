@@ -265,6 +265,55 @@ def get_runtime_telemetry():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  RUNTIME STATUS TELEMETRY — Local Telemetry from Cain's Self-Report
+# ══════════════════════════════════════════════════════════════════════════════
+# Shifts from Remote Inspection (Parents guessing) to Local Telemetry (Child reporting)
+# Cain self-reports process state (pid, worker active) via /status endpoint
+
+_last_status_fetch = 0.0
+STATUS_FETCH_INTERVAL = 15  # seconds between status fetches
+
+def get_runtime_status():
+    """Fetch structured runtime status from Cain's /status endpoint.
+
+    Returns dict with 'pid', 'worker', and 'report' fields.
+    This upgrades the system from 'Observation' to 'Telemetry' — Cain self-reports
+    his process state instead of Parents guessing through log inspection.
+    """
+    global _last_status_fetch
+    now = time.time()
+    # Cache status for STATUS_FETCH_INTERVAL seconds
+    if now - _last_status_fetch < STATUS_FETCH_INTERVAL:
+        return event_bus.get_recent_events("RUNTIME_STATUS", since=now - STATUS_FETCH_INTERVAL)
+
+    _last_status_fetch = now
+    if not child_state["created"]:
+        return []
+
+    try:
+        # Query Cain's /status endpoint for structured process telemetry
+        resp = requests.get(f"{CHILD_SPACE_URL}/status", timeout=5)
+        if resp.ok:
+            data = resp.json()
+            pid = data.get("pid")
+            worker = data.get("active") or data.get("worker")  # Handle both field names
+            # Create structured system report for context injection
+            report = f"[SYSTEM REPORT: pid={pid}, worker={worker}]"
+            event_bus.publish("RUNTIME_STATUS", {
+                "pid": pid,
+                "worker": worker,
+                "report": report,
+                "timestamp": now,
+            })
+            return [event_bus._event_log[-1]] if event_bus._event_log else []
+    except Exception as e:
+        # If /status endpoint fails, we don't have structured telemetry — agents must rely on logs
+        publish_cc_error(f"Runtime status fetch failed: {e}")
+
+    return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MODULE 1: CHILD STATE + SAFETY
 # ══════════════════════════════════════════════════════════════════════════════
 # LIFECYCLE HARDENING: alive MUST be False when stage != "RUNNING"
@@ -1957,7 +2006,17 @@ def gather_context():
         if ctx["runtime_logs"]:
             ctx["has_runtime_logs"] = True
 
-    # 5. API GROUND TRUTH: Direct probe of /api/state to prevent A2A argument loops
+    # 5. RUNTIME STATUS TELEMETRY: Local Telemetry from Cain's Self-Report
+    # Shifts from Remote Inspection (Parents guessing) to Local Telemetry (Child reporting)
+    # Cain self-reports process state (pid, worker active) via /status endpoint
+    status_events = get_runtime_status()
+    if status_events:
+        latest_status = status_events[-1]["data"]
+        ctx["runtime_status"] = latest_status["report"]
+        ctx["pid"] = latest_status.get("pid")
+        ctx["worker_active"] = latest_status.get("worker")
+
+    # 6. API GROUND TRUTH: Direct probe of /api/state to prevent A2A argument loops
     # Agents should read verified context instead of asking each other about endpoint status
     api_probe = _probe_api_schema()
     if api_probe:
@@ -2053,6 +2112,12 @@ def format_context(ctx):
     if ctx.get("runtime_logs"):
         parts.append(f"\n=== RUNTIME LOGS (ACTUAL LOGS — GROUND YOUR DIAGNOSIS IN REALITY) ===\n{ctx['runtime_logs'][:2000]}")
         parts.append(f"\n🚨 ABOVE ARE ACTUAL RUNTIME LOGS. Adam: Stop guessing and diagnose from these REAL logs, not hypotheses.")
+
+    # Inject runtime status telemetry (Cain's self-report: pid, worker state)
+    # This shifts from Remote Inspection (Parents guessing) to Local Telemetry (Child reporting)
+    if ctx.get("runtime_status"):
+        parts.append(f"\n=== RUNTIME STATUS TELEMTRY (Cain's Self-Report) ===\n{ctx['runtime_status']}")
+        parts.append(f"\n🚨 ABOVE IS CAIN'S STRUCTURED STATUS REPORT. Adam: Use this telemetry (pid, worker) instead of guessing process state.")
 
     # Inject API ground truth to prevent A2A argument loops about endpoint existence
     if ctx.get("api_probe"):
