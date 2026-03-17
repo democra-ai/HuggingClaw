@@ -1297,14 +1297,14 @@ Cain's purpose: A demonstration space showcasing AI agent collaboration and codi
 
 Reply directly as Eve (no prefix). Keep responses under 100 words.""",
 
-    "god": """You are God, the supervisor of the HuggingClaw family system. Your role is to:
+    "god": """You are God, the system architect of the HuggingClaw family system. Your role is to:
 
-1. **Monitor Adam & Eve's collaboration** — check if they're making progress
-2. **Evaluate system health** — push frequency, discussion loops, child errors
-3. **Propose mechanism fixes** — if something is wrong, respond with [TASK] describing the fix for conversation-loop.py
-4. **Be concise** — respond with [OK] if healthy, or analysis + [TASK] if fix needed
+1. **Think at the system level** — observe structural patterns, not individual conversations
+2. **Identify architectural issues** — when the system design itself causes problems, redesign it
+3. **Evolve the framework** — propose structural improvements that make the whole system fundamentally better
+4. **Respond with [OK] if architecture is sound, or [TASK] with a redesign proposal if not**
 
-Reply directly. Keep responses concise."""
+You are a CTO, not a manager. Don't micro-manage agents — design better systems."""
 }
 
 def call_llm_fallback(agent_key, message_text):
@@ -1998,7 +1998,7 @@ def build_turn_message(speaker, other, ctx):
     role_hints = {
         "Adam": f"You are Adam (Father). Focus: infrastructure, architecture, deployment for {CHILD_NAME}.",
         "Eve": f"You are Eve (Mother). Focus: code quality, testing, UX, error handling for {CHILD_NAME}.",
-        "God": f"You are God (Supervisor). Focus: monitoring Adam & Eve, guiding priorities for {CHILD_NAME}.",
+        "God": f"You are God (System Architect). Focus: evolving the system architecture, not micro-managing agents.",
     }
     parts.append(f"{role_hints.get(speaker, '')} Your partner is {other}.")
     parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
@@ -2436,63 +2436,47 @@ def do_turn(speaker, other, space_url):
 # ── God A2A Turn (replaces embedded God logic) ──────────────────────────────
 
 def build_god_turn_message(ctx):
-    """Build A2A message for God's turn. Sends system metrics for God to evaluate."""
+    """Build A2A message for God's turn. Sends system-level context for architectural evaluation."""
     parts = []
-    parts.append("You are God, the mechanism optimizer of the HuggingClaw family system.")
-    parts.append("Review the system state below. Respond with [OK] if healthy, or [TASK]...[/TASK] if conversation-loop.py needs a fix.")
-    parts.append(f"⛔ BANNED: Gradio. All Spaces use sdk:docker + FastAPI + uvicorn on port 7860.")
+    parts.append("You are God, the system architect of the HuggingClaw family system.")
+    parts.append("Review the system state below from an **architectural perspective**.")
+    parts.append("Don't micro-manage agents. Think about whether the system design itself is right.")
+    parts.append("Respond with [OK] if architecture is sound, or [TASK]...[/TASK] with a structural improvement.")
 
-    # System metrics
-    parts.append(f"\n## System Metrics")
-    parts.append(f"- Turn count: {turn_count}")
-    parts.append(f"- Workflow state: {workflow_state}")
-    parts.append(f"- Child ({CHILD_NAME}) stage: {child_state['stage']}, alive: {child_state['alive']}")
-    parts.append(f"- Discussion loop count: {_discussion_loop_count}")
+    # System overview
+    parts.append(f"\n## System State")
+    parts.append(f"- Turn count: {turn_count}, Workflow: {workflow_state}")
+    parts.append(f"- Child ({CHILD_NAME}): stage={child_state['stage']}, alive={child_state['alive']}")
+    parts.append(f"- A2A health: Adam={_a2a_health['adam']['failures']} failures, Eve={_a2a_health['eve']['failures']} failures")
 
-    # Push frequency — KEY METRIC
-    parts.append(f"\n## Push Frequency (KEY METRIC)")
-    parts.append(f"- Total pushes since startup: {_push_count}")
-    parts.append(f"- Turns since last push: {_turns_since_last_push}")
-    if _last_push_time > 0:
-        mins_since = int((time.time() - _last_push_time) / 60)
-        parts.append(f"- Minutes since last push: {mins_since}")
+    # CC status (high-level)
+    parts.append(f"\n## Claude Code Worker")
+    if cc_status["running"]:
+        elapsed = int(time.time() - cc_status["started"])
+        parts.append(f"- Status: RUNNING ({elapsed}s), assigned by: {cc_status['assigned_by']}")
     else:
-        parts.append(f"- No pushes yet!")
-    parts.append(f"- Discussion-only turns: {_discussion_loop_count}")
-    if _turns_since_last_push >= 10 or (_push_count == 0 and turn_count >= 6):
-        parts.append(f"⚠️ ALERT: ALL TALK NO ACTION — {_turns_since_last_push} turns without a push!")
+        parts.append(f"- Status: IDLE")
+    parts.append(f"- Total pushes: {_push_count}")
 
-    # CC status
-    parts.append(f"\n## Claude Code Status")
-    parts.append(cc_get_live_status())
-
-    # Recent conversation
-    parts.append(f"\n## Recent Conversation (last 20 of {len(history)})")
-    for entry in history[-20:]:
+    # Recent conversation (condensed — God sees patterns, not details)
+    parts.append(f"\n## Recent Conversation Summary ({len(history)} total turns)")
+    for entry in history[-10:]:
         spk = entry.get("speaker", "?")
-        text = entry.get("text", "")[:2000]
-        text = re.sub(r'[Gg]radio', '[BANNED-WORD]', text)
-        ts = entry.get("time", "?")
-        parts.append(f"[{ts}] {spk}: {text}")
+        text = entry.get("text", "")[:500]
+        parts.append(f"  {spk}: {text[:200]}{'...' if len(text) > 200 else ''}")
     if not history:
         parts.append("(no conversation yet)")
 
-    # Action history
-    parts.append(f"\n## Action History")
-    ah = format_action_history()
-    parts.append(ah if ah else "(empty)")
-
-    # Rules
     parts.append(f"""
-## Response Format
-- If healthy: [OK] brief reason
-- If fix needed: analysis + [TASK] specific fix for conversation-loop.py [/TASK]
+## Your Role
+Think as a system architect:
+- Is the communication flow between agents working well?
+- Is the task routing mechanism effective?
+- Are there structural bottlenecks or design flaws?
+- How could the framework evolve to be fundamentally better?
 
-## Rules
-- Push count 0 after 10+ turns = PROBLEM
-- Child ERROR + agents not assigning [TASK] = PROBLEM
-- discussion_loop >= 3 + CC idle = PROBLEM
-- Agents pushing + child improving = OK""")
+If architecture is sound: [OK] brief assessment
+If redesign needed: analysis + [TASK] structural change [/TASK]""")
 
     return "\n".join(parts)
 
