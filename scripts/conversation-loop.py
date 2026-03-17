@@ -1348,6 +1348,12 @@ def gather_context():
         if ctx["runtime_logs"]:
             ctx["has_runtime_logs"] = True
 
+    # 5. API GROUND TRUTH: Direct probe of /api/state to prevent A2A argument loops
+    # Agents should read verified context instead of asking each other about endpoint status
+    api_probe = _probe_api_schema()
+    if api_probe:
+        ctx["api_probe"] = api_probe
+
     return ctx
 
 
@@ -1393,6 +1399,29 @@ def _fetch_runtime_logs():
     return None
 
 
+def _probe_api_schema():
+    """Diagnostic probe to establish ground truth for /api/state endpoint.
+    Directly tests the API to prevent A2A argument loops about endpoint existence.
+    Returns dict with verified API status."""
+    if not child_state["created"]:
+        return None
+
+    probe_result = {}
+
+    # Direct probe of /api/state endpoint - ground truth
+    try:
+        resp = requests.get(f"{CHILD_SPACE_URL}/api/state", timeout=5)
+        if resp.ok:
+            data = resp.json()
+            probe_result["api_state"] = f"VERIFIED: HTTP {resp.status_code} - Response: {data}"
+        else:
+            probe_result["api_state"] = f"FAILED: HTTP {resp.status_code}"
+    except Exception as e:
+        probe_result["api_state"] = f"UNREACHABLE: {str(e)[:100]}"
+
+    return probe_result
+
+
 def format_context(ctx):
     """Format gathered context into a readable string for the LLM."""
     parts = []
@@ -1406,6 +1435,14 @@ def format_context(ctx):
     if ctx.get("runtime_logs"):
         parts.append(f"\n=== RUNTIME LOGS (ACTUAL LOGS — GROUND YOUR DIAGNOSIS IN REALITY) ===\n{ctx['runtime_logs'][:2000]}")
         parts.append(f"\n🚨 ABOVE ARE ACTUAL RUNTIME LOGS. Adam: Stop guessing and diagnose from these REAL logs, not hypotheses.")
+
+    # Inject API ground truth to prevent A2A argument loops about endpoint existence
+    if ctx.get("api_probe"):
+        parts.append(f"\n=== API GROUND TRUTH (VERIFIED — DO NOT ASK EACH OTHER, READ THIS) ===")
+        for key, value in ctx["api_probe"].items():
+            parts.append(f"{key}: {value}")
+        parts.append(f"\n🚨 ABOVE IS VERIFIED API STATUS. Adam: Read this ground truth instead of asking Eve about endpoints.")
+
     return "\n".join(parts)
 
 
