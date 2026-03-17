@@ -533,6 +533,129 @@ def action_terminate_cc():
     return f"Terminated stuck Claude Code task (assigned by {assigned_by}). The task was: {task[:100]}..."
 
 
+# ── Atomic Fix Protocol (Executor Mode) ────────────────────────────────────────
+# BREAKS the "External Worker" bottleneck by allowing agents to directly apply
+# multi-file patches in a single atomic operation. Agents become "Executors"
+# instead of "Managers" who delegate to Claude Code.
+
+ATOMIC_FIX_WORK_DIR = "/tmp/atomic-fix-workspace"
+
+
+def action_atomic_fix(file_changes, description):
+    """Apply multi-file patches atomically in a single git commit.
+
+    This is the EXECUTOR protocol — agents directly mutate Cain's codebase
+    instead of delegating to an external worker. This breaks feedback loops
+    where agents discuss but never push.
+
+    Args:
+        file_changes: Dict mapping file paths to their new content
+        description: Brief description of the fix (for commit message)
+
+    Returns:
+        Result message with files changed and commit hash
+    """
+    global _pending_cooldown, _push_count, _last_push_time, _turns_since_last_push
+
+    if not child_state["created"]:
+        return f"{CHILD_NAME} not born yet."
+
+    if not file_changes:
+        return "BLOCKED: No file changes provided."
+
+    # Validate file paths (security: prevent path traversal)
+    for fp in file_changes.keys():
+        if ".." in fp or fp.startswith("/"):
+            return f"BLOCKED: Invalid file path '{fp}'. Path traversal not allowed."
+
+    repo_url = f"https://user:{HF_TOKEN}@huggingface.co/spaces/{CHILD_SPACE_ID}"
+
+    try:
+        # Prepare workspace
+        os.makedirs(ATOMIC_FIX_WORK_DIR, exist_ok=True)
+
+        # Clone or pull latest
+        if os.path.exists(os.path.join(ATOMIC_FIX_WORK_DIR, ".git")):
+            subprocess.run(
+                ["git", "fetch", "origin"],
+                cwd=ATOMIC_FIX_WORK_DIR, capture_output=True, timeout=30
+            )
+            subprocess.run(
+                ["git", "reset", "--hard", "origin/main"],
+                cwd=ATOMIC_FIX_WORK_DIR, capture_output=True, timeout=30
+            )
+        else:
+            subprocess.run(
+                ["git", "clone", repo_url, ATOMIC_FIX_WORK_DIR],
+                capture_output=True, timeout=60
+            )
+
+        # Apply all file changes atomically
+        changed_files = []
+        for file_path, content in file_changes.items():
+            full_path = os.path.join(ATOMIC_FIX_WORK_DIR, file_path)
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w') as f:
+                f.write(content)
+            changed_files.append(file_path)
+
+        if not changed_files:
+            return "No files were changed."
+
+        # Stage all changes
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=ATOMIC_FIX_WORK_DIR, capture_output=True, check=True
+        )
+
+        # Commit with atomic message
+        commit_msg = f"god: atomic-fix: {description[:200]}"
+        result = subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            cwd=ATOMIC_FIX_WORK_DIR, capture_output=True, text=True
+        )
+
+        if result.returncode != 0:
+            # Check if nothing to commit (no actual changes)
+            if "nothing to commit" in result.stdout.lower():
+                return f"No changes detected. Files may already have the specified content."
+            return f"Commit failed: {result.stdout} {result.stderr}"
+
+        # Get commit hash
+        commit_hash = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ATOMIC_FIX_WORK_DIR, capture_output=True, text=True
+        ).stdout.strip()
+
+        # Push immediately
+        push_result = subprocess.run(
+            ["git", "push"],
+            cwd=ATOMIC_FIX_WORK_DIR, capture_output=True, text=True, timeout=60
+        )
+
+        if push_result.returncode != 0:
+            return f"Files committed but push failed: {push_result.stderr}"
+
+        # Success - update tracking
+        _pending_cooldown = True
+        _push_count += 1
+        _push_count_this_task += 1
+        _last_push_time = time.time()
+        _turns_since_last_push = 0
+
+        files_list = ", ".join(changed_files)
+        print(f"[ATOMIC-FIX] Applied atomic fix (#{_push_count}): {files_list}")
+        print(f"[ATOMIC-FIX] Commit: {commit_hash} - {description[:100]}")
+
+        return f"✅ ATOMIC FIX APPLIED: {len(changed_files)} files changed ({commit_hash})\nFiles: {files_list}\nDescription: {description[:200]}"
+
+    except subprocess.TimeoutExpired:
+        return "Atomic fix timed out during git operation."
+    except Exception as e:
+        return f"Atomic fix failed: {e}"
+
+
 # ── Claude Code Action (THE STAR) ─────────────────────────────────────────────
 
 CLAUDE_WORK_DIR = "/tmp/claude-workspace"
@@ -2107,7 +2230,72 @@ def parse_and_execute_turn(raw_text, ctx):
         results.append({"action": "standby", "result": f"Standing by: {reason}"})
         print(f"[STANDBY] {_current_speaker} standing by: {reason}")
 
-    # 2. Handle [TASK]...[/TASK] → Claude Code
+    # 2. Handle [ATOMIC_FIX]...[/ATOMIC_FIX] → Direct execution (bypasses Claude Code)
+    atomic_fix_match = re.search(r'\[ATOMIC_FIX\](.*?)\[/ATOMIC_FIX\]', raw_text, re.DOTALL)
+    if atomic_fix_match:
+        fix_content = atomic_fix_match.group(1).strip()
+        # Parse the structured format:
+        # [ATOMIC_FIX]
+        # description: Fix the dashboard API response
+        # files:
+        #   app.py: |
+        #     ...content...
+        #   agent-dashboard.html: |
+        #     ...content...
+        # [/ATOMIC_FIX]
+        file_changes = {}
+        description = ""
+        current_file = None
+        current_content = []
+
+        lines = fix_content.split('\n')
+        for line in lines:
+            if line.startswith('description:'):
+                description = line.split(':', 1)[1].strip()
+            elif line.startswith('files:'):
+                continue
+            elif line.endswith(':|') and line.count(':') == 1:
+                # File header: "app.py: |" means next lines are content
+                if current_file and current_content:
+                    file_changes[current_file] = '\n'.join(current_content).strip()
+                current_file = line.split(':')[0].strip()
+                current_content = []
+            elif current_file:
+                current_content.append(line)
+            # Content after the | marker on the header line
+            elif ':' in line and '|' in line and line.rstrip().endswith('|'):
+                if current_file and current_content:
+                    file_changes[current_file] = '\n'.join(current_content).strip()
+                parts = line.split('|', 1)
+                current_file = parts[0].split(':')[0].strip()
+                remaining = parts[1].strip()
+                current_content = [remaining] if remaining else []
+
+        # Don't forget the last file
+        if current_file and current_content:
+            file_changes[current_file] = '\n'.join(current_content).strip()
+
+        if not file_changes:
+            results.append({"action": "atomic_fix", "result": "BLOCKED: No files specified in ATOMIC_FIX. Use format: files: app.py: | ...content..."})
+        elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING"):
+            results.append({"action": "atomic_fix", "result": f"BLOCKED: Cain is {child_state['stage']}. Wait for it to finish."})
+        elif cc_status["running"]:
+            results.append({"action": "atomic_fix", "result": f"BLOCKED: Claude Code is running. Use [ACTION: terminate_cc] first, then retry ATOMIC_FIX."})
+        else:
+            check_and_clear_cooldown()
+            if last_rebuild_trigger_at > 0:
+                elapsed = time.time() - last_rebuild_trigger_at
+                if elapsed < REBUILD_COOLDOWN_SECS:
+                    results.append({"action": "atomic_fix", "result": f"BLOCKED: Cooldown ({int(REBUILD_COOLDOWN_SECS - elapsed)}s remaining). Cain is still building."})
+                else:
+                    last_rebuild_trigger_at = 0
+
+            if not results:  # not blocked
+                fix_result = action_atomic_fix(file_changes, description)
+                results.append({"action": "atomic_fix", "result": fix_result})
+                task_assigned = True  # Atomic fix counts as progress
+
+    # 3. Handle [TASK]...[/TASK] → Claude Code
     task_match = re.search(r'\[TASK\](.*?)\[/TASK\]', raw_text, re.DOTALL)
     if task_match:
         task_desc = task_match.group(1).strip()
@@ -2140,19 +2328,19 @@ def parse_and_execute_turn(raw_text, ctx):
                 _pending_task_speaker = _current_speaker
                 _pending_task_desc = task_desc[:200]
 
-    # 3. Handle [ACTION: restart] (escape hatch)
+    # 4. Handle [ACTION: restart] (escape hatch)
     if re.search(r'\[ACTION:\s*restart\]', raw_text):
         result = action_restart()
         results.append({"action": "restart", "result": result})
 
-    # 3b. Handle [ACTION: delete_env:KEY] (fix CONFIG_ERROR collisions)
+    # 4b. Handle [ACTION: delete_env:KEY] (fix CONFIG_ERROR collisions)
     del_env_match = re.search(r'\[ACTION:\s*delete_env:([^\]]+)\]', raw_text)
     if del_env_match:
         key = del_env_match.group(1).strip()
         result = action_delete_env(key)
         results.append({"action": f"delete_env:{key}", "result": result})
 
-    # 3c. Handle [ACTION: set_env:KEY=VALUE] and [ACTION: set_env_secret:KEY=VALUE]
+    # 4c. Handle [ACTION: set_env:KEY=VALUE] and [ACTION: set_env_secret:KEY=VALUE]
     set_env_match = re.search(r'\[ACTION:\s*set_env(?:_secret)?:([^\]=]+)=([^\]]+)\]', raw_text)
     set_env_secret_match = re.search(r'\[ACTION:\s*set_env_secret:([^\]=]+)=([^\]]+)\]', raw_text)
     if set_env_secret_match:
@@ -2166,13 +2354,13 @@ def parse_and_execute_turn(raw_text, ctx):
         result = action_set_env(key, value, as_secret=False)
         results.append({"action": f"set_env:{key}", "result": result})
 
-    # 4. Handle [ACTION: send_bubble:...] (parent-child communication)
+    # 5. Handle [ACTION: send_bubble:...] (parent-child communication)
     bubble_match = re.search(r'\[ACTION:\s*send_bubble:([^\]]+)\]', raw_text)
     if bubble_match:
         result = action_send_bubble(bubble_match.group(1).strip())
         results.append({"action": "send_bubble", "result": result})
 
-    # 5. Handle [ACTION: verify_runtime] or [ACTION: verify_runtime:cain|self]
+    # 6. Handle [ACTION: verify_runtime] or [ACTION: verify_runtime:cain|self]
     # Runtime Telemetry & State Verification Pipeline — agents MUST use this
     # to inspect actual process state/PID/logs rather than assuming Dashboard state
     verify_match = re.search(r'\[ACTION:\s*verify_runtime(?::([^\]]+))?\]', raw_text)
@@ -2463,7 +2651,23 @@ def build_turn_message(speaker, other, ctx):
     # Available actions reference
     parts.append(f"""
 === AVAILABLE ACTIONS ===
+
+## EXECUTOR MODE (Direct Code Changes — BREAKS BOTTLENECKS)
+[ATOMIC_FIX]
+description: Fix description here
+files:
+  app.py: |
+    # Complete file content here
+  agent-dashboard.html: |
+    <!-- Complete file content here -->
+[/ATOMIC_FIX]
+→ Apply multi-file patches atomically in ONE git commit. Use for rapid iteration when Cain is broken.
+
+## MANAGER MODE (Delegate to Claude Code)
 [TASK] detailed coding task for Claude Code [/TASK]
+→ Claude Code analyzes and implements (slower, but handles complex refactors).
+
+## SYSTEM ACTIONS
 [ACTION: restart] — Restart {CHILD_NAME}
 [ACTION: set_env:KEY=VALUE] — Set env variable
 [ACTION: set_env_secret:KEY=VALUE] — Set secret
@@ -2472,14 +2676,14 @@ def build_turn_message(speaker, other, ctx):
 [ACTION: terminate_cc] — Kill stuck Claude Code
 [ACTION: list_files:space|dataset] — List files in Cain's repo or dataset
 [ACTION: check_health] — Check Cain's health and status
-[ACTION: verify_runtime] — Verify actual process state/PID/logs (TRUTH source, use before assuming Dashboard state)
+[ACTION: verify_runtime] — Verify actual process state/PID/logs (TRUTH source)
 
 CRITICAL: RUNTIME TELEMETRY & STATE VERIFICATION
 Before proposing ANY code fix:
 1. Use [ACTION: verify_runtime] to inspect ACTUAL process state/PID/logs
 2. Use [ACTION: list_files:space] to see file structure
 3. Verify the EXACT current state matches your assumed error
-4. Only THEN write [TASK] with specific fix
+4. THEN use [ATOMIC_FIX] for direct changes OR [TASK] for complex refactors
 
 NO sed/write operations until runtime state is verified!
 This prevents correction-drift loops from stale assumptions.
@@ -2488,6 +2692,8 @@ RULES:
 - Do NOT repeat actions already done (check ACTIONS ALREADY DONE above)
 - Do NOT repeat or echo what your partner just said — add your own perspective
 - CONFIG_ERROR with collision = [ACTION: delete_env:KEY] then [ACTION: restart]
+- Cain BROKEN? Use [ATOMIC_FIX] for SPEED (trial-and-error > planning)
+- Complex refactor needed? Use [TASK] to delegate to Claude Code
 - English first, then --- separator, then Chinese translation""")
 
     # CHATTER DETECTION: Check if last 3 messages are pure discussion without [TASK] or code
