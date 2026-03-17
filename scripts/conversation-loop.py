@@ -395,6 +395,18 @@ _failure_report_timestamp = 0.0  # When the failure report was captured
 _crash_loop_backoff_count = 0  # Tracks consecutive crashes (exponential backoff)
 _max_crash_retries = 5  # Maximum consecutive crash attempts before manual intervention
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  POST_MORTEM_STACKTRACE PROTOCOL — Diagnostic Gate for Crash Loops
+# ══════════════════════════════════════════════════════════════════════════════
+# Blocks remediation actions when agent is stuck in APP_STARTING, forcing
+# diagnostic data extraction before allowing new code pushes.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_app_starting_turn_count = 0  # Turns spent in APP_STARTING state
+_stage_entry_time = 0.0  # When we entered the current stage
+_diagnostic_gate_required = False  # Whether diagnostic data is required before edits
+_last_diagnostic_timestamp = 0.0  # When diagnostic data was last provided
+
 
 class FailureReport:
     """Structured failure data captured when container exits with code 1.
@@ -1061,18 +1073,34 @@ def action_check_health():
 
 
 def action_restart():
-    """Restart Cain's Space."""
+    """Restart Cain's Space with state verification (POST_MORTEM_STACKTRACE)."""
     if not child_state["created"]:
         return f"{CHILD_NAME} not born yet."
     try:
-        global _pending_cooldown
+        global _pending_cooldown, _stage_entry_time
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  POST_MORTEM_STACKTRACE: State Verification — confirm restart physically executed
+        # ══════════════════════════════════════════════════════════════════════════════
+        info_before = hf_api.space_info(CHILD_SPACE_ID)
+        updated_at_before = info_before.runtime.updated_at if hasattr(info_before, 'runtime') and info_before.runtime else None
+
         hf_api.restart_space(CHILD_SPACE_ID)
+
+        # Verify restart by checking if updatedAt timestamp changed
+        time.sleep(1)  # Brief pause to allow API to update
+        info_after = hf_api.space_info(CHILD_SPACE_ID)
+        updated_at_after = info_after.runtime.updated_at if hasattr(info_after, 'runtime') and info_after.runtime else None
+
+        state_verified = (updated_at_before != updated_at_after)
+        verification_msg = f"State verification: {'PASSED' if state_verified else 'PENDING (timestamp unchanged)'}"
+
         child_state["alive"] = False  # LIFECYCLE: RESTARTING != alive
         child_state["stage"] = "RESTARTING"
         child_state["status"] = STATUS_BOOTSTRAPPING  # Will enter READY after /healthz succeeds
         child_state["ready_since"] = 0.0
+        _stage_entry_time = time.time()  # Track restart time for crash detection
         _pending_cooldown = True
-        return f"{CHILD_NAME} is restarting."
+        return f"{CHILD_NAME} is restarting. {verification_msg}"
     except Exception as e:
         return f"Restart failed: {e}"
 
@@ -3262,6 +3290,7 @@ def parse_and_execute_turn(raw_text, ctx):
     """Parse LLM output. Route [TASK] to Claude Code, handle few escape-hatch actions."""
     global _pending_cooldown, last_rebuild_trigger_at, last_claude_code_result, _discussion_loop_count
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc
+    global _diagnostic_gate_required, _app_starting_turn_count, _last_diagnostic_timestamp, _turns_since_last_verification
     results = []
     task_assigned = False
 
@@ -3384,6 +3413,11 @@ def parse_and_execute_turn(raw_text, ctx):
             #  LOGS_OVERRIDE PROTOCOL: Block application edits until platform health verified
             # ══════════════════════════════════════════════════════════════════════════════
             results.append({"action": "atomic_fix", "result": f"BLOCKED: LOGS_OVERRIDE PROTOCOL ACTIVE. Cain is in error state with NO LOGS visible. You MUST fetch platform logs FIRST before any application edits. Use: curl -s {CHILD_SPACE_URL}/api/logs | tail -100"})
+        elif _diagnostic_gate_required:
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  POST_MORTEM_STACKTRACE: Block edits until diagnostic data extracted
+            # ══════════════════════════════════════════════════════════════════════════════
+            results.append({"action": "atomic_fix", "result": f"BLOCKED: POST_MORTEM_STACKTRACE PROTOCOL ACTIVE. Cain has been in APP_STARTING for {_app_starting_turn_count} turns. You CANNOT edit code until you provide diagnostic data. Use: curl -s {CHILD_SPACE_URL}/api/logs | tail -50 or [ACTION: check_health] to fetch the actual error causing the boot failure."})
         else:
             check_and_clear_cooldown()
             if last_rebuild_trigger_at > 0:
@@ -3486,7 +3520,12 @@ def parse_and_execute_turn(raw_text, ctx):
     # 4c. Handle [ACTION: set_env:KEY=VALUE] and [ACTION: set_env_secret:KEY=VALUE]
     set_env_match = re.search(r'\[ACTION:\s*set_env(?:_secret)?:([^\]=]+)=([^\]]+)\]', raw_text)
     set_env_secret_match = re.search(r'\[ACTION:\s*set_env_secret:([^\]=]+)=([^\]]+)\]', raw_text)
-    if set_env_secret_match:
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  POST_MORTEM_STACKTRACE: Block env changes when diagnostic gate is active
+    # ══════════════════════════════════════════════════════════════════════════════
+    if _diagnostic_gate_required and (set_env_match or set_env_secret_match):
+        results.append({"action": "set_env", "result": f"BLOCKED: POST_MORTEM_STACKTRACE PROTOCOL ACTIVE. Cain has been in APP_STARTING for {_app_starting_turn_count} turns. You CANNOT modify environment variables until you provide diagnostic data. Use: curl -s {CHILD_SPACE_URL}/api/logs | tail -50 or [ACTION: check_health] to fetch the actual error causing the boot failure."})
+    elif set_env_secret_match:
         key = set_env_secret_match.group(1).strip()
         value = set_env_secret_match.group(2).strip()
         result = action_set_env(key, value, as_secret=True)
@@ -3511,8 +3550,14 @@ def parse_and_execute_turn(raw_text, ctx):
         target = verify_match.group(1).strip() if verify_match.group(1) else "cain"
         result = action_verify_runtime(target)
         results.append({"action": f"verify_runtime:{target}", "result": result})
-        global _turns_since_last_verification
         _turns_since_last_verification = 0  # Reset speculation counter on verification tool use
+        # ══════════════════════════════════════════════════════════════════════════════
+        #  POST_MORTEM_STACKTRACE: Clear diagnostic gate when verification tool used
+        # ══════════════════════════════════════════════════════════════════════════════
+        if _diagnostic_gate_required:
+            _diagnostic_gate_required = False
+            _last_diagnostic_timestamp = time.time()
+            print(f"[POST_MORTEM] Diagnostic gate CLEARED - agent fetched runtime telemetry")
 
     # 7. Handle [ACTION: wakeup_worker] — Direct Runtime Injection Protocol
     # Immediately triggers Space restart to flush cached code.
@@ -4114,11 +4159,23 @@ def do_turn(speaker, other, space_url):
     """Execute one conversation turn (non-blocking — CC runs in background)."""
     global last_action_results, turn_count, _current_speaker, _discussion_loop_count, _turns_since_last_push
     global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc
-    global _turns_since_last_verification
+    global _turns_since_last_verification, _app_starting_turn_count, _diagnostic_gate_required
     turn_count += 1
     _turns_since_last_push += 1
     _turns_since_last_verification += 1  # Track speculation without verification
     _current_speaker = speaker
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  POST_MORTEM_STACKTRACE: Increment turn counter if in APP_STARTING
+    # ══════════════════════════════════════════════════════════════════════════════
+    if child_state["stage"] in ("APP_STARTING", "RUNNING_APP_STARTING"):
+        _app_starting_turn_count += 1
+        if _app_starting_turn_count > 2:
+            _diagnostic_gate_required = True
+            print(f"[POST_MORTEM] APP_STARTING for {_app_starting_turn_count} turns - DIAGNOSTIC GATE ACTIVE")
+    else:
+        _app_starting_turn_count = 0
+        _diagnostic_gate_required = False
 
     # Skip agent if they have too many consecutive failures (prevents blocking the whole loop)
     agent_key = speaker.lower()
@@ -4430,6 +4487,22 @@ while True:
             old_stage = child_state["stage"]
             print(f"[STATUS] {child_state['stage']} → {new_stage}")
             child_state["stage"] = new_stage
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  POST_MORTEM_STACKTRACE: Track stage entry for APP_STARTING detection
+            # ══════════════════════════════════════════════════════════════════════════════
+            if new_stage in ("APP_STARTING", "RUNNING_APP_STARTING"):
+                # Entering APP_STARTING - track entry time
+                if old_stage not in ("APP_STARTING", "RUNNING_APP_STARTING"):
+                    _stage_entry_time = time.time()
+                    _app_starting_turn_count = 0
+                    _diagnostic_gate_required = False
+                    print(f"[POST_MORTEM] Entering APP_STARTING - turn counter reset")
+            else:
+                # Leaving APP_STARTING - reset counters
+                if old_stage in ("APP_STARTING", "RUNNING_APP_STARTING"):
+                    _app_starting_turn_count = 0
+                    _diagnostic_gate_required = False
+                    print(f"[POST_MORTEM] Leaving APP_STARTING - counters reset")
             # ══════════════════════════════════════════════════════════════════════════════
             #  LIVENESS & READINESS: Two-Stage Startup Protocol
             # ══════════════════════════════════════════════════════════════════════════════
