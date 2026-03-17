@@ -1604,13 +1604,12 @@ def gather_context():
     else:
         ctx.update(_context_cache[cache_key])
 
-    # 4. LOG ARTIFACTS: Inject actual runtime logs when in error state
-    # Adam needs to stop guessing and fetch actual logs from the runtime environment
-    # to ground diagnosis in reality, not hypotheses
-    if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR", "unknown", "Unknown"):
-        ctx["runtime_logs"] = _fetch_runtime_logs()
-        if ctx["runtime_logs"]:
-            ctx["has_runtime_logs"] = True
+    # 4. RUNTIME TELEMETRY INJECTION: Always fetch stdout_tail
+    # Agents need actual runtime logs to ground diagnosis in reality, not hypotheses
+    # This breaks semantic analysis loops by providing real execution data
+    ctx["runtime_logs"] = _fetch_runtime_logs()
+    if ctx["runtime_logs"]:
+        ctx["has_runtime_logs"] = True
 
     # 5. API GROUND TRUTH: Direct probe of /api/state to prevent A2A argument loops
     # Agents should read verified context instead of asking each other about endpoint status
