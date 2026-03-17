@@ -800,6 +800,15 @@ def action_terminate_cc():
     return f"Terminated stuck Claude Code task (assigned by {assigned_by}). The task was: {task[:100]}..."
 
 
+def action_reset_circuit_breaker():
+    """Reset circuit breaker after successful intervention. Only God should call this."""
+    global _escalated, _supervisor_mode, _circuit_break_reason
+    if not _escalated:
+        return "Circuit breaker is not triggered. Nothing to reset."
+    _reset_circuit_breaker()
+    return "CIRCUIT BREAKER RESET: Normal operations resumed. Adam/Eve can now submit tasks again."
+
+
 # ── Atomic Fix Protocol (Executor Mode) ────────────────────────────────────────
 # BREAKS the "External Worker" bottleneck by allowing agents to directly apply
 # multi-file patches in a single atomic operation. Agents become "Executors"
@@ -1584,6 +1593,12 @@ def cc_submit_task(task, assigned_by, ctx):
                     _current_task["result"] = result[:500] if result else ""
 
             print(f"[CC-DONE] Task from {assigned_by} finished ({len(result)} chars)")
+
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  CIRCUIT BREAKER: Check if repeated failure should trigger escalation
+            # ══════════════════════════════════════════════════════════════════════════════
+            if not success and _check_escalation(result):
+                print(f"[CIRCUIT-BREAKER] Escalation triggered due to repeated error in result")
         except Exception as e:
             # Publish CC_ERROR event
             publish_cc_error(e)
@@ -1598,6 +1613,11 @@ def cc_submit_task(task, assigned_by, ctx):
                     _current_task["result"] = str(e)[:500]
 
             print(f"[CC-ERROR] Task from {assigned_by} failed: {e}")
+            # ══════════════════════════════════════════════════════════════════════════════
+            #  CIRCUIT BREAKER: Check if repeated failure should trigger escalation
+            # ══════════════════════════════════════════════════════════════════════════════
+            if _check_escalation(str(e)):
+                print(f"[CIRCUIT-BREAKER] Escalation triggered due to repeated error: {e}")
 
         # ══════════════════════════════════════════════════════════════════════════════
         #  STATE SYNCHRONIZATION & ENGLISH PROTOCOL ENFORCEMENT
@@ -2636,8 +2656,13 @@ def format_action_history():
         lines.append(f"  Turn #{ah['turn']} {ah['speaker']}: {ah['action']} → {ah['result'][:120]}")
     return "\n".join(lines)
 
-# Simple workflow state: BIRTH / WAITING / ACTIVE
+# Simple workflow state: BIRTH / ACTIVE / ESCALATED
 workflow_state = "BIRTH" if not child_state["created"] else "ACTIVE"
+
+def _update_workflow_state():
+    """Update workflow state based on circuit breaker status."""
+    global workflow_state, _escalated
+    workflow_state = "ESCALATED" if _escalated else ("BIRTH" if not child_state["created"] else "ACTIVE")
 
 # Discussion loop detector — tracks consecutive discussion-only turns (no tasks assigned)
 _discussion_loop_count = 0  # how many turns in a row with no [TASK] while CC is IDLE and child is alive
@@ -2652,6 +2677,73 @@ _pending_task_desc = ""  # what was the task?
 # Agents must CLAIM a file before assigning TASK. Claims expire after 2 turns (approx 4 minutes).
 _file_claims = {}  # filename -> (speaker, claim_turn, claim_time)
 _claim_turn_counter = 0  # increments each turn, used to expire stale claims
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CIRCUIT BREAKER PROTOCOL — Auto-escalation on repeated failures
+# ══════════════════════════════════════════════════════════════════════════════
+# Tracks error signatures and auto-escalates to ESCALATED state after 2 failures.
+# When ESCALATED, normal operations pause and "Supervisor" mode is invoked.
+# ══════════════════════════════════════════════════════════════════════════════
+_escalated = False  # Circuit breaker state
+_error_failures = {}  # error_signature -> (count, first_seen_time, last_error_msg)
+_ESCALATION_THRESHOLD = 2  # Escalate after 2 failures for same error
+_circuit_break_reason = ""  # Human-readable reason for escalation
+_supervisor_mode = False  # When True, only God can intervene
+
+def _get_error_signature(task_result):
+    """Extract error signature from task result for circuit breaker tracking."""
+    if not task_result:
+        return "empty_result"
+    # Common error patterns
+    result_lower = task_result.lower()
+    if "git" in result_lower and ("permission" in result_lower or "denied" in result_lower):
+        return "git_permission_error"
+    if "permission denied" in result_lower:
+        return "permission_denied"
+    if "runtime error" in result_lower:
+        return "runtime_error"
+    if "build error" in result_lower:
+        return "build_error"
+    if "config error" in result_lower:
+        return "config_error"
+    if "import" in result_lower and "error" in result_lower:
+        return "import_error"
+    if "syntax" in result_lower and "error" in result_lower:
+        return "syntax_error"
+    # Generic hash of first 100 chars for unknown errors
+    import hashlib
+    return f"unknown_{hashlib.md5(task_result[:100].encode()).hexdigest()[:8]}"
+
+def _check_escalation(task_result):
+    """Check if task failure should trigger circuit breaker escalation."""
+    global _escalated, _circuit_break_reason, _supervisor_mode, _error_failures
+
+    sig = _get_error_signature(task_result)
+    now = time.time()
+
+    if sig in _error_failures:
+        count, first_seen, last_msg = _error_failures[sig]
+        _error_failures[sig] = (count + 1, first_seen, task_result[:200])
+        if count + 1 >= _ESCALATION_THRESHOLD and not _escalated:
+            _escalated = True
+            _supervisor_mode = True
+            _circuit_break_reason = f"Error '{sig}' failed {_ESCALATION_THRESHOLD} times. Last: {task_result[:150]}"
+            _update_workflow_state()
+            print(f"[CIRCUIT-BREAKER] ESCALATED: {_circuit_break_reason}")
+            return True
+    else:
+        _error_failures[sig] = (1, now, task_result[:200])
+    return False
+
+def _reset_circuit_breaker():
+    """Reset circuit breaker after successful intervention."""
+    global _escalated, _circuit_break_reason, _supervisor_mode, _error_failures
+    _escalated = False
+    _supervisor_mode = False
+    _circuit_break_reason = ""
+    _error_failures.clear()
+    _update_workflow_state()
+    print("[CIRCUIT-BREAKER] Reset: Normal operations resumed")
 
 
 def parse_and_execute_turn(raw_text, ctx):
@@ -2674,6 +2766,14 @@ def parse_and_execute_turn(raw_text, ctx):
     if re.search(r'\[ACTION:\s*terminate_cc\]', raw_text):
         result = action_terminate_cc()
         results.append({"action": "terminate_cc", "result": result})
+
+    # 1bb. Handle [ACTION: reset_circuit_breaker] — God-only action to reset ESCALATED state
+    if re.search(r'\[ACTION:\s*reset_circuit_breaker\]', raw_text):
+        if _current_speaker != "God":
+            results.append({"action": "reset_circuit_breaker", "result": "BLOCKED: Only God can reset the circuit breaker."})
+        else:
+            result = action_reset_circuit_breaker()
+            results.append({"action": "reset_circuit_breaker", "result": result})
 
     # 1c. Handle [CLAIM: filename] — File claim protocol (prevents contention thrashing)
     # Agents must claim a file before assigning a TASK to it. Claims expire after 2 turns.
@@ -2781,7 +2881,24 @@ def parse_and_execute_turn(raw_text, ctx):
                 results.append({"action": "atomic_fix", "result": fix_result})
                 task_assigned = True  # Atomic fix counts as progress
 
+    # 2b. Handle [FAILURE_REASON] — Circuit Breaker Protocol for unresolvable errors
+    # Agents use this to signal that a problem cannot be resolved with normal approaches
+    failure_reason_match = re.search(r'\[FAILURE_REASON\](.*?)\[/FAILURE_REASON\]', raw_text, re.DOTALL)
+    if failure_reason_match:
+        reason = failure_reason_match.group(1).strip()
+        global _circuit_break_reason, _escalated, _supervisor_mode
+        _circuit_break_reason = f"Agent reported unresolvable error: {reason}"
+        _escalated = True
+        _supervisor_mode = True
+        _update_workflow_state()
+        results.append({"action": "failure_reason", "result": f"CIRCUIT BREAKER TRIGGERED: {reason}. System escalated to Supervisor mode. Only God can intervene now."})
+        print(f"[CIRCUIT-BREAKER] Agent reported FAILURE_REASON: {reason}")
+
     # 3. Handle [TASK]...[/TASK] → Claude Code
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  CIRCUIT BREAKER: Block normal task spawning when ESCALATED
+    # ══════════════════════════════════════════════════════════════════════════════
+    # When in ESCALATED state, only God can submit tasks. Adam/Eve tasks are blocked.
     task_match = re.search(r'\[TASK\](.*?)\[/TASK\]', raw_text, re.DOTALL)
     if task_match:
         task_desc = task_match.group(1).strip()
@@ -2792,6 +2909,10 @@ def parse_and_execute_turn(raw_text, ctx):
             results.append({"action": "task", "result": f"BLOCKED: Cain is {child_state['stage']}. Wait for it to finish."})
         elif cc_status["running"]:
             results.append({"action": "task", "result": f"BLOCKED: Claude Code is already working on a task assigned by {cc_status['assigned_by']}. Wait for it to finish."})
+        elif _supervisor_mode and _current_speaker != "God":
+            # Circuit Breaker: Only God can submit tasks when in ESCALATED/Supervisor mode
+            results.append({"action": "task", "result": f"BLOCKED by CIRCUIT BREAKER: System is in ESCALATED state. Reason: {_circuit_break_reason}. Only God can intervene now. Use [STANDBY: waiting for God intervention] to yield."})
+            print(f"[CIRCUIT-BREAKER] Blocked {_current_speaker}'s task: System is ESCALATED")
 
         # ══════════════════════════════════════════════════════════════════════════════
         #  SHORT-CIRCUIT VERIFICATION PROTOCOL: Check Eve's status before dispatching
