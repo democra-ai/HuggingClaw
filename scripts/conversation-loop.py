@@ -1452,9 +1452,75 @@ _cc_stale_count = 0                 # how many turns CC output hasn't changed
 _last_cc_output_time = 0.0          # timestamp of last NEW CC output line
 CC_STUCK_TIMEOUT = 180              # seconds with no new output before CC is considered STUCK
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  TASK QUEUE & STATUS TRACKING — Asynchronous Orchestration
+# ══════════════════════════════════════════════════════════════════════════════
+# Replaces synchronous execution with queue-based task management.
+# Status: PENDING, RUNNING, COMPLETED, FAILED
+# Timeout: Auto-kill tasks running >90s
+# ══════════════════════════════════════════════════════════════════════════════
+
+from enum import Enum
+class TaskStatus(Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    TIMEOUT_KILLED = "TIMEOUT_KILLED"
+
+_task_queue = []  # queue of pending tasks
+_task_queue_lock = threading.Lock()
+_current_task = None  # {"task": str, "assigned_by": str, "status": TaskStatus, "started": float, "result": str}
+TASK_TIMEOUT = 90  # seconds before task is auto-killed
+
+def task_queue_status():
+    """Get current task queue status for agent awareness."""
+    with _task_queue_lock:
+        if _current_task:
+            elapsed = int(time.time() - _current_task.get("started", 0))
+            return {
+                "current": {
+                    "task": _current_task["task"][:100],
+                    "assigned_by": _current_task["assigned_by"],
+                    "status": _current_task["status"].value,
+                    "elapsed": elapsed,
+                },
+                "pending": len(_task_queue),
+            }
+        return {"current": None, "pending": len(_task_queue)}
+
+def _check_task_timeout():
+    """Check if current task has timed out and kill it if needed."""
+    global _current_task
+    with _task_queue_lock:
+        if not _current_task or _current_task["status"] != TaskStatus.RUNNING:
+            return False
+
+        elapsed = time.time() - _current_task.get("started", 0)
+        if elapsed > TASK_TIMEOUT:
+            print(f"[TASK-TIMEOUT] Task '{_current_task['task'][:50]}...' timed out after {elapsed}s. Killing.")
+            _current_task["status"] = TaskStatus.TIMEOUT_KILLED
+            _current_task["result"] = f"(TIMEOUT_KILLED after {elapsed}s)"
+            # Reset cc_status to allow new tasks
+            with cc_lock:
+                cc_status["running"] = False
+                cc_status["result"] = _current_task["result"]
+            return True
+    return False
+
 
 def cc_submit_task(task, assigned_by, ctx):
-    """Submit a task to Claude Code in background. Non-blocking."""
+    """Submit a task to Claude Code in background. Non-blocking.
+
+    Uses task queue for asynchronous orchestration. Agents can check task status
+    and yield control when CC is busy instead of analyzing stale state.
+    """
+    global _current_task
+
+    with _task_queue_lock:
+        if _current_task and _current_task["status"] == TaskStatus.RUNNING:
+            return f"BUSY: CC is working on '{_current_task['task'][:50]}...'. Use [YIELD] to wait for completion."
+
     with cc_lock:
         if cc_status["running"]:
             return "BUSY: Claude Code is already working on a task. Wait for it to finish."
@@ -1476,6 +1542,16 @@ def cc_submit_task(task, assigned_by, ctx):
         _last_cc_output_time = time.time()  # Initialize to now, will update as we get output
         _push_count_this_task = 0  # Reset push count for new task
 
+    # Set current task in queue
+    with _task_queue_lock:
+        _current_task = {
+            "task": task[:200],
+            "assigned_by": assigned_by,
+            "status": TaskStatus.RUNNING,
+            "started": time.time(),
+            "result": "",
+        }
+
     # Publish CC_STARTED event for real-time status
     publish_cc_started(task, assigned_by)
 
@@ -1483,7 +1559,7 @@ def cc_submit_task(task, assigned_by, ctx):
     print(f"[TASK] {assigned_by} assigned to Claude Code ({len(enriched)} chars)...")
 
     def worker():
-        global _cc_stale_count, _last_cc_snapshot, _context_cache, _push_count_this_task
+        global _cc_stale_count, _last_cc_snapshot, _context_cache, _push_count_this_task, _current_task
         try:
             result = action_claude_code(enriched)
             success = "error" not in result.lower() and "failed" not in result.lower()
@@ -1500,6 +1576,13 @@ def cc_submit_task(task, assigned_by, ctx):
                 # Reset stale tracking when CC finishes - critical for adaptive pacing
                 _cc_stale_count = 0
                 _last_cc_snapshot = ""
+
+            # Update task status in queue
+            with _task_queue_lock:
+                if _current_task:
+                    _current_task["status"] = TaskStatus.COMPLETED if success else TaskStatus.FAILED
+                    _current_task["result"] = result[:500] if result else ""
+
             print(f"[CC-DONE] Task from {assigned_by} finished ({len(result)} chars)")
         except Exception as e:
             # Publish CC_ERROR event
@@ -1507,6 +1590,13 @@ def cc_submit_task(task, assigned_by, ctx):
             with cc_lock:
                 cc_status["running"] = False
                 cc_status["result"] = f"Error: {e}"
+
+            # Update task status in queue
+            with _task_queue_lock:
+                if _current_task:
+                    _current_task["status"] = TaskStatus.FAILED
+                    _current_task["result"] = str(e)[:500]
+
             print(f"[CC-ERROR] Task from {assigned_by} failed: {e}")
 
         # ══════════════════════════════════════════════════════════════════════════════
@@ -1702,8 +1792,22 @@ def cc_submit_task_god(task):
 
 
 def cc_get_live_status():
-    """Get CC's current status and recent output for agents to discuss."""
+    """Get CC's current status and recent output for agents to discuss.
+
+    Includes task queue status for asynchronous orchestration.
+    Agents can check task status and yield control when CC is busy.
+    """
     global _last_cc_snapshot, _cc_stale_count, _last_cc_output_time
+
+    # Get task queue status first
+    queue_status = task_queue_status()
+    queue_note = ""
+    if queue_status["current"]:
+        current = queue_status["current"]
+        queue_note = f"\n📋 Task Queue: {current['status']} ({current['elapsed']}s, by {current['assigned_by']})"
+        if queue_status["pending"] > 0:
+            queue_note += f" | Pending: {queue_status['pending']}"
+
     with cc_lock:
         if cc_status["running"]:
             elapsed = int(time.time() - cc_status["started"])
@@ -1718,6 +1822,7 @@ def cc_get_live_status():
                 _last_cc_snapshot = snapshot
                 _last_cc_output_time = time.time()  # Update when we see NEW output
             stale_note = f"\n(No new output for {_cc_stale_count} turns — discuss other topics while waiting)" if _cc_stale_count >= 2 else ""
+            yield_hint = f"\n💡 TIP: Use [YIELD] to skip your turn and let CC finish working." if _cc_stale_count >= 1 else ""
 
             # Detect COMPLETED CC: output shows completion markers but status wasn't updated
             # This happens when worker thread fails to update status after completion
@@ -1764,7 +1869,7 @@ def cc_get_live_status():
             if cc_status["running"]:
                 return (f"🔨 Claude Code is WORKING (assigned by {cc_status['assigned_by']}, {elapsed}s ago)\n"
                         f"Task: {cc_status['task']}\n"
-                        f"Recent output:\n{recent}{stale_note}{stuck_note}")
+                        f"Recent output:\n{recent}{stale_note}{yield_hint}{stuck_note}{queue_note}")
 
         if cc_status["result"]:
             result = cc_status["result"]
@@ -1777,9 +1882,9 @@ def cc_get_live_status():
             if cc_status.get("verification_result"):
                 verification_suffix = f"\n🔍 STATE VERIFICATION (immediate check after push):\n{cc_status['verification_result']}"
             return (f"✅ Claude Code FINISHED (assigned by {cc_status['assigned_by']}){early_failure_warning}\n"
-                    f"Result:\n{result[:1500]}{verification_suffix}")
+                    f"Result:\n{result[:1500]}{verification_suffix}{queue_note}")
         else:
-            return "💤 Claude Code is IDLE — no active task."
+            return f"💤 Claude Code is IDLE — no active task.{queue_note}"
 
 
 # Patch action_claude_code to also feed cc_live_lines
@@ -2599,6 +2704,19 @@ def parse_and_execute_turn(raw_text, ctx):
         reason = standby_match.group(1).strip()
         results.append({"action": "standby", "result": f"Standing by: {reason}"})
         print(f"[STANDBY] {_current_speaker} standing by: {reason}")
+
+    # 1e. Handle [YIELD] — Explicit yield when CC is busy (asynchronous orchestration)
+    # Agents use YIELD to skip their turn and let CC finish working, preventing chatter loops
+    if re.search(r'\[YIELD\]|\[YIELD:\s*([^\]]+)\]', raw_text):
+        yield_match = re.search(r'\[YIELD:\s*([^\]]+)\]', raw_text)
+        reason = yield_match.group(1).strip() if yield_match else "CC is working, waiting for completion"
+        queue_info = task_queue_status()
+        queue_detail = ""
+        if queue_info["current"]:
+            current = queue_info["current"]
+            queue_detail = f" ({current['status']}, {current['elapsed']}s elapsed)"
+        results.append({"action": "yield", "result": f"Yielded: {reason}{queue_detail}"})
+        print(f"[YIELD] {_current_speaker} yielded: {reason}")
 
     # 2. Handle [ATOMIC_FIX]...[/ATOMIC_FIX] → Direct execution (bypasses Claude Code)
     atomic_fix_match = re.search(r'\[ATOMIC_FIX\](.*?)\[/ATOMIC_FIX\]', raw_text, re.DOTALL)
@@ -3600,6 +3718,16 @@ while True:
         check_and_restart_unhealthy_agents()
     except Exception as e:
         print(f"[A2A-HEALTH] Error checking health: {e}", file=sys.stderr)
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  TASK TIMEOUT KILL — Asynchronous Orchestration: Auto-kill long-running tasks
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Check if current task has exceeded timeout (>90s) and kill it if needed.
+    # This prevents deadlock where worker hangs and agents keep analyzing stale state.
+    if _check_task_timeout():
+        print(f"[TASK-TIMEOUT] Task was auto-killed. Agents can now assign new tasks.")
+        # Clear context to break any loops
+        _context_cache.clear()
 
     # CORRUPTED CONVERSATION RESET: Detect and reset poisoned conversation history
     # Symptoms: empty messages, messages ending with "-" (cut off), repeated emergency loops
