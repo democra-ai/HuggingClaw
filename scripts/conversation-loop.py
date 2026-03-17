@@ -2714,6 +2714,24 @@ RULES:
             parts.append(f"\n🚨 SYSTEM: STOP DISCUSSION. EXECUTE [TASK] or PUSH.")
             parts.append(f"Agents are stuck in conversational loop. Write ONLY [TASK]...[/TASK] this turn.")
 
+    # THROTTLING LOGIC: Detect repeated analysis without new logs
+    # If agents analyze the same problem multiple times without new logs, force action
+    if len(history) >= 4 and not cc_status["running"]:
+        recent_texts = [h.get("text", "") for h in history[-4:]]
+        # Check for repeated analysis keywords without [TASK] or new log indicators
+        analysis_keywords = ["analyze", "analysis", "investigate", "check", "examine", "review", "diagnose"]
+        log_indicators = ["[ACTION:", "[TASK]", "log shows", "logs reveal", "output:", "error:", "traceback"]
+        repeated_analysis = 0
+        has_any_task = any("[TASK]" in t or "[ACTION:" in t for t in recent_texts)
+        has_new_logs = any(any(ind in t.lower() for ind in log_indicators) for t in recent_texts)
+        for text in recent_texts[-3:]:  # Check last 3 messages
+            if any(kw in text.lower() for kw in analysis_keywords) and not has_new_logs:
+                repeated_analysis += 1
+        if repeated_analysis >= 2 and not has_any_task:
+            parts.append(f"\n🚨 THROTTLING: Repeated analysis without new logs detected.")
+            parts.append(f"If analysis is repeated more than once without new logs, immediately request a system reboot or code patch.")
+            parts.append(f"Use [ACTION: terminate_cc] followed by [TASK] with a concrete fix, or [ATOMIC_FIX] for direct patch.")
+
     # EMERGENCY OVERRIDE PROTOCOL: PUSH_ONLY mode for breaking discussion loops
     # When triggered, force agents to generate a task regardless of CC status
     global _force_push_mode, _force_push_skip_termination, _emergency_override_active
