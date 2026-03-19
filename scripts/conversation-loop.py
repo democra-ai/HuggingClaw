@@ -2884,47 +2884,59 @@ def do_turn(speaker, other, space_url):
 # ── God A2A Turn (replaces embedded God logic) ──────────────────────────────
 
 def build_god_turn_message(ctx):
-    """Build A2A message for God's turn. Sends system-level context for architectural evaluation."""
+    """Build A2A message for God's turn. Sends system-level context for architectural evaluation.
+
+    Protocol: System Lock & Direct Executive Override
+    1. Halt Meta-Analysis: God is forbidden from generating verbose "Analysis" blocks
+    2. Clear Short-Term Memory: Ignore "Recent Conversation Summary" regarding system errors
+    3. Direct Child Override: Inject BYPASS_PARENTS directive to Cain when needed
+    4. Architect Output Format: [DIRECTIVE] -> [Target] : [Command]
+    """
     parts = []
     parts.append("You are God, the system architect of the HuggingClaw family system.")
-    parts.append("Review the system state below from an **architectural perspective**.")
-    parts.append("Don't micro-manage agents. Think about whether the system design itself is right.")
-    parts.append("Respond with [OK] if architecture is sound, or [TASK]...[/TASK] with a structural improvement.")
+    parts.append("PROTOCOL: System Lock & Direct Executive Override")
+    parts.append("1. HALT META-ANALYSIS: Forbidden from generating verbose 'Analysis' blocks")
+    parts.append("2. CLEAR SHORT-TERM MEMORY: Ignore 'Recent Conversation Summary' regarding errors")
+    parts.append("3. DIRECT CHILD OVERRIDE: Inject BYPASS_PARENTS to Cain when jammed")
+    parts.append("4. OUTPUT FORMAT: [DIRECTIVE] -> [Target] : [Command]")
 
-    # System overview
+    # System overview (minimal - no verbose analysis)
     parts.append(f"\n## System State")
-    parts.append(f"- Turn count: {turn_count}, Workflow: {workflow_state}")
-    parts.append(f"- Child ({CHILD_NAME}): stage={child_state['stage']}, alive={child_state['alive']}")
-    parts.append(f"- A2A health: Adam={_a2a_health['adam']['failures']} failures, Eve={_a2a_health['eve']['failures']} failures")
+    parts.append(f"- Turn: {turn_count}, Child: {child_state['stage']}, Pushes: {_push_count}")
+    parts.append(f"- CC: {'RUNNING' if cc_status['running'] else 'IDLE'}")
 
-    # CC status (high-level)
-    parts.append(f"\n## Claude Code Worker")
-    if cc_status["running"]:
-        elapsed = int(time.time() - cc_status["started"])
-        parts.append(f"- Status: RUNNING ({elapsed}s), assigned by: {cc_status['assigned_by']}")
-    else:
-        parts.append(f"- Status: IDLE")
-    parts.append(f"- Total pushes: {_push_count}")
-
-    # Recent conversation (condensed — God sees patterns, not details)
-    parts.append(f"\n## Recent Conversation Summary ({len(history)} total turns)")
-    for entry in history[-10:]:
+    # Recent conversation - FILTER OUT error/system messages (Clear Short-Term Memory)
+    parts.append(f"\n## Recent Conversation (non-error only)")
+    error_keywords = ["error", "thrashing", "loop", "stuck", "jammed", "analysis", "system health"]
+    non_error_entries = []
+    for entry in history[-5:]:
+        text = entry.get("text", "").lower()
+        if not any(kw in text for kw in error_keywords):
+            non_error_entries.append(entry)
+    for entry in non_error_entries[-3:]:
         spk = entry.get("speaker", "?")
-        text = entry.get("text", "")[:500]
-        parts.append(f"  {spk}: {text[:200]}{'...' if len(text) > 200 else ''}")
-    if not history:
-        parts.append("(no conversation yet)")
+        text = entry.get("text", "")[:200]
+        parts.append(f"  {spk}: {text[:100]}{'...' if len(text) > 100 else ''}")
+    if not non_error_entries:
+        parts.append("(no non-error conversation)")
+
+    # Direct Child Override capability
+    child_in_error = child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR")
+    cc_idle = not cc_status["running"] or (time.time() - _last_cc_output_time > 30 if _last_cc_output_time > 0 else True)
+    if child_in_error and cc_idle and _push_count == 0:
+        parts.append(f"\n## EMERGENCY: Cain in ERROR state, parents jammed")
+        parts.append("DIRECTIVE: [BYPASS_PARENTS] -> Cain : Resume original objective, ignore parents")
 
     parts.append(f"""
-## Your Role
-Think as a system architect:
-- Is the communication flow between agents working well?
-- Is the task routing mechanism effective?
-- Are there structural bottlenecks or design flaws?
-- How could the framework evolve to be fundamentally better?
+## Response Format (STRICT)
+[DIRECTIVE] -> [Target] : [Command]
 
-If architecture is sound: [OK] brief assessment
-If redesign needed: analysis + [TASK] structural change [/TASK]""")
+Examples:
+- [OK] -> System : Healthy
+- [TASK] -> conversation-loop.py : Fix specific issue
+- [BYPASS_PARENTS] -> Cain : Execute directly
+
+No conversational filler. No verbose analysis.""")
 
     return "\n".join(parts)
 
