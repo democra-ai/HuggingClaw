@@ -532,6 +532,12 @@ def _write_claude_md(workspace, role="worker"):
 - Your goal: maximize push frequency, not perfection on first try
 - If unsure, just pick a reasonable fix and push — see what breaks
 
+## STATE VERIFICATION (CRITICAL — Prevent Semantic Grounding Failure)
+- BEFORE proposing any fix: READ the target file to verify current state
+- If your proposed fix matches the current file content: ACKNOWLEDGE "Fix already applied" and HALT
+- DO NOT repeat tasks based on conversation history — the file system is the source of truth
+- Conversation history may be stale — always verify against actual files before acting
+
 ## Focus
 Improve {CHILD_NAME}'s functionality, add features, fix bugs.
 Do NOT re-check or re-configure infrastructure that is already working.
