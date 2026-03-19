@@ -170,6 +170,14 @@ _structural_verification_trigger_time = 0.0  # When STRUCTURAL VERIFICATION was 
 _structural_verification_required = True  # Whether state probe is still required
 STRUCTURAL_VERIFICATION_RESET_SECS = 180  # 3 minutes — STRUCTURAL VERIFICATION lasts this long before returning to normal
 
+# INVASIVE DIAGNOSTICS PROTOCOL — Break hypothesis loop with actual crash logs
+# Detects when agents are stuck discussing without verifying against runtime
+# Forces CODE FREEZE on app.py/frontend and requires EXTERNAL AUDIT before modifications
+_invasive_diagnostics_mode = False  # When True, require external audit before any code changes
+_invasive_diagnostics_trigger_time = 0.0  # When INVASIVE DIAGNOSTICS was triggered
+_invasive_diagnostics_required = True  # Whether external audit is still required
+INVASIVE_DIAGNOSTICS_RESET_SECS = 240  # 4 minutes — INVASIVE DIAGNOSTICS lasts this long before returning to normal
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -1325,7 +1333,14 @@ def gather_context():
 
 def _fetch_invasive_diagnostics():
     """Fetch actual crash logs and error details from HF API.
-    Bypasses frontend/a2a-proxy to get real runtime errors."""
+    Bypasses frontend/a2a-proxy to get real runtime errors.
+
+    INVASIVE DIAGNOSTICS PROTOCOL:
+    - Retrieves stdout/stderr directly from container logs
+    - Verifies active network ports (is 8000 actually listening?)
+    - Checks for Python syntax errors in startup logs
+    - Provides GROUND TRUTH to break hypothesis loops
+    """
     if not child_state["created"]:
         return None
 
@@ -1359,8 +1374,38 @@ def _fetch_invasive_diagnostics():
         if lresp.ok:
             logs = lresp.text
             diagnostic_parts.append(f"\n=== RECENT LOGS (last 1000 chars) ===\n{logs[-1000:]}")
+
+            # INVASIVE DIAGNOSTICS: Python syntax error detection
+            # Check for common Python syntax errors in startup logs
+            syntax_error_patterns = [
+                "SyntaxError", "IndentationError", "NameError",
+                "ModuleNotFoundError", "ImportError", "KeyError",
+                "AttributeError", "TypeError", "ValueError"
+            ]
+            logs_lower = logs.lower()
+            found_errors = []
+            for pattern in syntax_error_patterns:
+                if pattern.lower() in logs_lower:
+                    found_errors.append(pattern)
+            if found_errors:
+                diagnostic_parts.append(f"\n=== PYTHON SYNTAX ERRORS DETECTED ===\n{', '.join(found_errors)}")
+                diagnostic_parts.append(f"\nACTION REQUIRED: Check the FULL error traceback above.")
+                diagnostic_parts.append(f"Do NOT hypothesize. The traceback tells you exactly what's wrong.")
+
     except:
         pass  # Endpoint might not exist, that's OK
+
+    # INVASIVE DIAGNOSTICS: Network port verification
+    # Check if port 8000 (uvicorn default) is actually listening
+    try:
+        # Try to connect to the Space URL on port 80/443 (mapped to internal 7860)
+        # This verifies the container is actually accepting connections
+        presp = requests.get(f"{CHILD_SPACE_URL}/", timeout=3)
+        diagnostic_parts.append(f"\n=== NETWORK STATUS ===\nHTTP {presp.status_code} - Container is responding")
+    except requests.exceptions.Timeout:
+        diagnostic_parts.append(f"\n=== NETWORK STATUS ===\nTIMEOUT - Port may be blocked or app not listening")
+    except Exception as e:
+        diagnostic_parts.append(f"\n=== NETWORK STATUS ===\nERROR - {type(e).__name__}: {str(e)[:100]}")
 
     return "\n".join(diagnostic_parts) if diagnostic_parts else None
 
@@ -2514,6 +2559,34 @@ RULES:
         else:
             parts.append(f"State probe complete. You may now proceed with edits based on the verified file state.")
 
+    # INVASIVE DIAGNOSTICS PROTOCOL: Force external audit to break hypothesis loop
+    # When triggered, agents MUST perform non-invasive runtime inspection before ANY code modifications
+    if _invasive_diagnostics_mode:
+        parts.append(f"\n🩺🩺🩺 INVASIVE DIAGNOSTICS PROTOCOL: EXTERNAL AUDIT REQUIRED 🩺🩺🩺")
+        parts.append(f"Hypothesis loop detected. Agents are discussing theories without verifying against the runtime environment.")
+        if _invasive_diagnostics_required:
+            parts.append(f"\n🛑 CODE FREEZE IN EFFECT!")
+            parts.append(f"MANDATE: The next task assigned MUST be a non-invasive runtime inspection.")
+            parts.append(f"")
+            parts.append(f"PROHIBITED ACTIONS:")
+            parts.append(f"  - ❌ NO modifications to app.py")
+            parts.append(f"  - ❌ NO modifications to frontend/ files")
+            parts.append(f"  - ❌ NO source code edits of any kind")
+            parts.append(f"")
+            parts.append(f"REQUIRED ACTIONS:")
+            parts.append(f"  - ✅ Execute runtime inspection commands (ls, cat, docker, netstat)")
+            parts.append(f"  - ✅ Verify actual crash logs in stderr/stdout")
+            parts.append(f"  - ✅ Check network port status (is 8000 listening?)")
+            parts.append(f"  - ✅ Identify Python syntax errors in startup logs")
+            parts.append(f"")
+            parts.append(f"Write [TASK]...[/TASK] with a runtime inspection command:")
+            parts.append(f"[TASK] Execute 'cat /tmp/logs/*.log 2>/dev/null | tail -50' to retrieve crash logs. Post the full output. [/TASK]")
+            parts.append(f"")
+            parts.append(f"PRINCIPLE: Determine WHY the runtime is failing BEFORE attempting to fix code.")
+            parts.append(f"Do NOT write code. Read the state.")
+        else:
+            parts.append(f"External audit complete. You may now proceed with code modifications based on verified runtime state.")
+
     return "\n".join(parts)
 
 
@@ -3112,6 +3185,55 @@ This is a PURGE & REBOOT — start fresh, don't reference previous failed attemp
         print(f"[STRUCTURAL-VERIFICATION] Mode timeout ({STRUCTURAL_VERIFICATION_RESET_SECS}s), resetting to normal")
         _structural_verification_mode = False
         _structural_verification_required = False
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  INVASIVE DIAGNOSTICS PROTOCOL — Break hypothesis loop with actual crash logs
+    #  Detects when agents are stuck discussing without verifying against runtime
+    #  Forces CODE FREEZE on app.py/frontend and requires EXTERNAL AUDIT before modifications
+    #  ══════════════════════════════════════════════════════════════════════════════
+    # Note: _invasive_diagnostics_mode, _invasive_diagnostics_trigger_time, _invasive_diagnostics_required are module-level globals
+
+    # INVASIVE DIAGNOSTICS TRIGGER: Detect blind debugging without runtime verification
+    # Pattern: Agents discussing hypotheses, theories, or code fixes WITHOUT checking actual runtime state
+    # Detection: Check recent conversation for hypothesis discussion with NO runtime/external audit
+    if not _invasive_diagnostics_mode and not _structural_verification_mode and not _sanity_check_mode and not _force_push_mode and not _lockdown_mode:
+        # Only trigger when Cain is in error states (RUNTIME_ERROR, BUILD_ERROR, RUNNING_APP_STARTING)
+        if child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "RUNNING_APP_STARTING"):
+            if len(history) >= 3 and _discussion_loop_count >= 2:
+                # Check if recent conversation shows blind debugging pattern
+                recent_texts = " ".join(h.get("text", "") for h in history[-3:])
+                recent_lower = recent_texts.lower()
+
+                # Hypothesis/debugging keywords: discussing what MIGHT be wrong without verification
+                hypothesis_keywords = [
+                    "might be", "could be", "perhaps", "maybe", "possibly",
+                    "the issue could", "i suspect", "i think", "seems like",
+                    "probably", "likely", "should fix", "let's try",
+                    "hypothesis", "theory", "guess", "assume"
+                ]
+
+                # External audit keywords: evidence of actual runtime inspection
+                external_audit_keywords = [
+                    "docker", "container", "pid", "stdout", "stderr",
+                    "ls -la", "cat /app", "network", "port", "listening",
+                    "syntax error", "traceback", "actual logs", "runtime logs"
+                ]
+
+                has_hypothesis = any(kw in recent_lower for kw in hypothesis_keywords)
+                has_external_audit = any(kw in recent_lower for kw in external_audit_keywords)
+
+                # Trigger invasive diagnostics if: hypothesizing BUT no external audit AND Cain is in error state
+                if has_hypothesis and not has_external_audit:
+                    print(f"[INVASIVE-DIAGNOSTICS] TRIGGERED! Blind debugging loop detected ({_discussion_loop_count} turns). Agents discussing hypotheses without runtime verification. Forcing EXTERNAL AUDIT.")
+                    _invasive_diagnostics_mode = True
+                    _invasive_diagnostics_trigger_time = time.time()
+                    _invasive_diagnostics_required = True
+
+    # Reset INVASIVE DIAGNOSTICS mode after timeout (safety valve)
+    if _invasive_diagnostics_mode and time.time() - _invasive_diagnostics_trigger_time > INVASIVE_DIAGNOSTICS_RESET_SECS:
+        print(f"[INVASIVE-DIAGNOSTICS] Mode timeout ({INVASIVE_DIAGNOSTICS_RESET_SECS}s), resetting to normal")
+        _invasive_diagnostics_mode = False
+        _invasive_diagnostics_required = False
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
