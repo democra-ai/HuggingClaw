@@ -155,6 +155,13 @@ _lockdown_push_count_at_error = 0  # Push count when error started (to detect if
 LOCKDOWN_ERROR_THRESHOLD_SECS = 600  # 10 minutes in error state without effective pushes triggers LOCKDOWN
 LOCKDOWN_RESET_SECS = 180  # 3 minutes — LOCKDOWN lasts this long before returning to normal
 
+# SANITY CHECK Mode — Break source-analysis loop by forcing runtime inspection
+# Detects when agents are stuck discussing source code without verifying against runtime
+_sanity_check_mode = False  # When True, require runtime inspection before source modifications
+_sanity_check_trigger_time = 0.0  # When SANITY CHECK was triggered
+_sanity_check_required = True  # Whether runtime inspection is still required
+SANITY_CHECK_RESET_SECS = 180  # 3 minutes — SANITY CHECK lasts this long before returning to normal
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -946,6 +953,14 @@ WORKER_HEARTBEAT_TIMEOUT = 30  # seconds before triggering diagnostic review
 
 def cc_submit_task(task, assigned_by, ctx):
     """Submit a task to Claude Code in background. Non-blocking."""
+    global _sanity_check_required
+
+    # SANITY CHECK: Detect runtime command and clear the requirement flag
+    runtime_command_keywords = ["ls -la", "ls /app", "pwd", "cat /app", "docker", "whoami", "env"]
+    if _sanity_check_required and any(kw in task.lower() for kw in runtime_command_keywords):
+        print(f"[SANITY-CHECK] Runtime command detected in task, clearing requirement flag")
+        _sanity_check_required = False
+
     with cc_lock:
         if cc_status["running"]:
             return "BUSY: Claude Code is already working on a task. Wait for it to finish."
@@ -2083,7 +2098,7 @@ def build_turn_message(speaker, other, ctx):
     (SOUL.md, IDENTITY.md, workspace/memory/). This message provides only
     context and turn instructions.
     """
-    global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _discussion_loop_count
+    global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _discussion_loop_count, _sanity_check_mode, _sanity_check_required
     parts = []
 
     # Brief role context (supplements agent's SOUL.md until it's fully configured)
@@ -2376,6 +2391,23 @@ RULES:
             parts.append(f"CC is idle. Write [TASK]...[/TASK] NOW with a concrete code fix.")
         parts.append(f"DO NOT discuss. DO NOT plan. Write task ONLY.")
         parts.append(f"SYSTEM OVERRIDE: PLANNING SUSPENDED. EXECUTE PUSH NOW.")
+
+    # SANITY CHECK PROTOCOL: Force runtime inspection to break source-analysis loop
+    # When triggered, agents MUST execute a runtime command before any source code modifications
+    if _sanity_check_mode:
+        parts.append(f"\n🔍🔍🔍 SANITY CHECK: RUNTIME INSPECTION REQUIRED 🔍🔍🔍")
+        parts.append(f"Source-analysis loop detected. Agents are discussing code without verifying against the runtime environment.")
+        if _sanity_check_required:
+            parts.append(f"\n🛑 STOP ALL SOURCE CODE MODIFICATIONS!")
+            parts.append(f"MANDATE: The next task assigned MUST be a runtime inspection command.")
+            parts.append(f"")
+            parts.append(f"Write [TASK]...[/TASK] with EXACTLY this command:")
+            parts.append(f"[TASK] Execute 'ls -la /app' to list the directory structure of the running container. Post the full output. [/TASK]")
+            parts.append(f"")
+            parts.append(f"⛔ NO app.py modifications. NO source code edits. ONLY runtime inspection.")
+            parts.append(f"This establishes GROUND TRUTH required to break the deadlock.")
+        else:
+            parts.append(f"Runtime inspection complete. You may now proceed with source code modifications based on the verified runtime state.")
 
     return "\n".join(parts)
 
@@ -2886,6 +2918,50 @@ This is a PURGE & REBOOT — start fresh, don't reference previous failed attemp
         _lockdown_mode = False
         _lockdown_error_onset = 0
         _lockdown_push_count_at_error = 0
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  SANITY CHECK MODE — Break source-analysis loop by forcing runtime inspection
+    #  Detects when agents are stuck discussing source code without verifying against runtime
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Note: _sanity_check_mode, _sanity_check_trigger_time, _sanity_check_required are module-level globals
+
+    # SANITY CHECK TRIGGER: Detect source-analysis loop
+    # Pattern: Agents discussing source code (app.py, imports, structure) without runtime verification
+    # Detection: Check recent conversation for source-analysis keywords with NO runtime commands
+    if not _sanity_check_mode and not _force_push_mode and not _lockdown_mode:
+        if len(history) >= 3 and _discussion_loop_count >= 2:
+            # Check if recent conversation shows source-analysis pattern
+            recent_texts = " ".join(h.get("text", "") for h in history[-3:])
+            recent_lower = recent_texts.lower()
+
+            # Source-analysis keywords: discussing code structure without runtime verification
+            source_analysis_keywords = [
+                "app.py", "import", "function", "class", "structure", "file",
+                "code shows", "the code", "let me check", "according to the code",
+                "looking at the code", "the file", "source", "implementation"
+            ]
+
+            # Runtime command keywords: evidence of actual runtime interaction
+            runtime_keywords = [
+                "[task]", "ls -la", "pwd", "cat /app", "ls /app", "docker",
+                "container", "runtime", "executed", "ran command", "output shows"
+            ]
+
+            has_source_analysis = any(kw in recent_lower for kw in source_analysis_keywords)
+            has_runtime_verification = any(kw in recent_lower for kw in runtime_keywords)
+
+            # Trigger sanity check if: analyzing source BUT no runtime verification
+            if has_source_analysis and not has_runtime_verification:
+                print(f"[SANITY-CHECK] TRIGGERED! Source-analysis loop detected ({_discussion_loop_count} turns). Agents discussing code without runtime verification. Forcing runtime inspection.")
+                _sanity_check_mode = True
+                _sanity_check_trigger_time = time.time()
+                _sanity_check_required = True
+
+    # Reset SANITY CHECK mode after timeout (safety valve)
+    if _sanity_check_mode and time.time() - _sanity_check_trigger_time > SANITY_CHECK_RESET_SECS:
+        print(f"[SANITY-CHECK] Mode timeout ({SANITY_CHECK_RESET_SECS}s), resetting to normal")
+        _sanity_check_mode = False
+        _sanity_check_required = False
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
