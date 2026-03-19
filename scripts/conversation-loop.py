@@ -1301,7 +1301,14 @@ def gather_context():
     # 2. Environment variables
     ctx["env"] = action_get_env()
 
-    # 3. File lists (cache, refresh when stage changes)
+    # 3. INVASIVE DIAGNOSTICS — Fetch actual crash logs when in deadlock states
+    # This breaks the "hypothesize -> check code -> repeat" loop by providing actual runtime errors
+    if child_state["stage"] in ("RUNNING_APP_STARTING", "RUNTIME_ERROR", "BUILD_ERROR"):
+        diagnostic = _fetch_invasive_diagnostics()
+        if diagnostic:
+            ctx["invasive_diagnostics"] = diagnostic
+
+    # 4. File lists (cache, refresh when stage changes)
     cache_key = f"files_{child_state['stage']}"
     if cache_key not in _context_cache:
         ctx["space_files"] = action_list_files("space")
@@ -1316,11 +1323,59 @@ def gather_context():
     return ctx
 
 
+def _fetch_invasive_diagnostics():
+    """Fetch actual crash logs and error details from HF API.
+    Bypasses frontend/a2a-proxy to get real runtime errors."""
+    if not child_state["created"]:
+        return None
+
+    diagnostic_parts = []
+    try:
+        # Fetch detailed runtime error from HF Spaces API
+        rresp = requests.get(
+            f"https://huggingface.co/api/spaces/{CHILD_SPACE_ID}/runtime",
+            headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=10)
+        if rresp.ok:
+            rdata = rresp.json()
+            error_message = rdata.get("errorMessage", "")
+            if error_message:
+                diagnostic_parts.append(f"=== RUNTIME ERROR MESSAGE ===\n{error_message[:2000]}")
+
+            # Also check stage and runtime info
+            stage = rdata.get("stage", "")
+            if stage:
+                diagnostic_parts.append(f"\n=== RUNTIME STAGE ===\n{stage}")
+
+            # Check if there's runtime info
+            runtime_info = rdata.get("runtime", {})
+            if runtime_info:
+                diagnostic_parts.append(f"\n=== RUNTIME INFO ===\n{str(runtime_info)[:500]}")
+    except Exception as e:
+        diagnostic_parts.append(f"=== DIAGNOSTIC FETCH ERROR ===\n{e}")
+
+    # Try to fetch recent logs from the Space's exposed endpoint (if available)
+    try:
+        lresp = requests.get(f"{CHILD_SPACE_URL}/api/logs", timeout=5)
+        if lresp.ok:
+            logs = lresp.text
+            diagnostic_parts.append(f"\n=== RECENT LOGS (last 1000 chars) ===\n{logs[-1000:]}")
+    except:
+        pass  # Endpoint might not exist, that's OK
+
+    return "\n".join(diagnostic_parts) if diagnostic_parts else None
+
+
 def format_context(ctx):
     """Format gathered context into a readable string for the LLM."""
     parts = []
     parts.append(f"=== HEALTH ===\n{ctx.get('health', 'unknown')}")
     parts.append(f"\n=== ENVIRONMENT ===\n{ctx.get('env', 'none')}")
+
+    # INVASIVE DIAGNOSTICS — Show crash logs FIRST (before file lists)
+    # This ensures agents see actual runtime errors before hypothesizing
+    if ctx.get("invasive_diagnostics"):
+        parts.append(f"\n=== INVASIVE DIAGNOSTICS (ACTUAL CRASH LOGS) ===\n{ctx['invasive_diagnostics']}")
+
     if ctx.get("space_files"):
         parts.append(f"\n=== SPACE FILES ===\n{ctx['space_files'][:2000]}")
     if ctx.get("dataset_files"):
@@ -2257,6 +2312,17 @@ def build_turn_message(speaker, other, ctx):
             parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. Cooldown active: {int(cooldown_remaining)}s remaining. Discuss plans but DO NOT assign [TASK] until cooldown ends.")
         else:
             parts.append(f"\n{CHILD_NAME} is {child_state['stage']}. No cooldown. YOU MUST write a [TASK]...[/TASK] to investigate or fix issues. Don't just discuss.")
+
+            # INVASIVE DIAGNOSTICS PROTOCOL — Break hypothesis loop when in DEADLOCK states
+            # When Cain is stuck starting, agents MUST verify against actual runtime errors
+            if child_state["stage"] == "RUNNING_APP_STARTING":
+                parts.append(f"\n🔴 INVASIVE DIAGNOSTICS REQUIRED:")
+                parts.append(f"{CHILD_NAME} is DEADLOCKED in APP_STARTING state!")
+                parts.append(f"⛑️ CHECK THE 'INVASIVE DIAGNOSTICS' SECTION ABOVE — it contains ACTUAL crash logs from runtime!")
+                parts.append(f"🛑 DO NOT hypothesize based on source code reading. The crash logs tell you the TRUTH.")
+                parts.append(f"📋 Your [TASK] must address the SPECIFIC Python Exception shown in the diagnostics.")
+                parts.append(f"🚨 PUSH a fix NOW. Trial-and-error > 10 turns of discussion.")
+
         # Add recent task reminder during cooldown/building
         if recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
