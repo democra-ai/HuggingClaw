@@ -162,6 +162,14 @@ _sanity_check_trigger_time = 0.0  # When SANITY CHECK was triggered
 _sanity_check_required = True  # Whether runtime inspection is still required
 SANITY_CHECK_RESET_SECS = 180  # 3 minutes — SANITY CHECK lasts this long before returning to normal
 
+# STRUCTURAL STATE VERIFICATION PROTOCOL — Break blind retry loop by forcing state probe
+# Detects when agents are stuck editing files without verifying the actual runtime state
+# Prevents "blind retry loop" where agents keep making the same fix without checking if it's needed
+_structural_verification_mode = False  # When True, require state probe before file edits
+_structural_verification_trigger_time = 0.0  # When STRUCTURAL VERIFICATION was triggered
+_structural_verification_required = True  # Whether state probe is still required
+STRUCTURAL_VERIFICATION_RESET_SECS = 180  # 3 minutes — STRUCTURAL VERIFICATION lasts this long before returning to normal
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -953,13 +961,19 @@ WORKER_HEARTBEAT_TIMEOUT = 30  # seconds before triggering diagnostic review
 
 def cc_submit_task(task, assigned_by, ctx):
     """Submit a task to Claude Code in background. Non-blocking."""
-    global _sanity_check_required
+    global _sanity_check_required, _structural_verification_required
 
     # SANITY CHECK: Detect runtime command and clear the requirement flag
     runtime_command_keywords = ["ls -la", "ls /app", "pwd", "cat /app", "docker", "whoami", "env"]
     if _sanity_check_required and any(kw in task.lower() for kw in runtime_command_keywords):
         print(f"[SANITY-CHECK] Runtime command detected in task, clearing requirement flag")
         _sanity_check_required = False
+
+    # STRUCTURAL VERIFICATION: Detect state probe command and clear the requirement flag
+    state_probe_keywords = ["tail -n", "cat app.py", "cat /tmp/claude-workspace/app.py", "check the file", "verify the state"]
+    if _structural_verification_required and any(kw in task.lower() for kw in state_probe_keywords):
+        print(f"[STRUCTURAL-VERIFICATION] State probe command detected in task, clearing requirement flag")
+        _structural_verification_required = False
 
     with cc_lock:
         if cc_status["running"]:
@@ -2409,6 +2423,31 @@ RULES:
         else:
             parts.append(f"Runtime inspection complete. You may now proceed with source code modifications based on the verified runtime state.")
 
+    # STRUCTURAL STATE VERIFICATION PROTOCOL: Force state probe to break blind retry loop
+    # When triggered, agents MUST verify the actual file state before making edits
+    if _structural_verification_mode:
+        parts.append(f"\n🏗️🏗️🏗️ STRUCTURAL STATE VERIFICATION: STATE PROBE REQUIRED 🏗️🏗️🏗️")
+        parts.append(f"Blind retry loop detected. Agents are editing files without verifying the actual runtime state.")
+        if _structural_verification_required:
+            parts.append(f"\n🛑 HALT ALL DIRECT FILE EDITS!")
+            parts.append(f"MANDATE: The next action MUST be a non-invasive read operation to determine the ACTUAL current state.")
+            parts.append(f"")
+            parts.append(f"Write [TASK]...[/TASK] with EXACTLY this command:")
+            parts.append(f"[TASK] Execute 'tail -n 20 /tmp/claude-workspace/app.py' to verify the current file state. Post the full output. [/TASK]")
+            parts.append(f"")
+            parts.append(f"⛔ NO write_to_file. NO append_to_file. ONLY state verification.")
+            parts.append(f"")
+            parts.append(f"CONDITIONAL LOGIC AFTER PROBE:")
+            parts.append(f"  - If uvicorn.run IS present: STOP. The issue is elsewhere (e.g., port conflict, dependency error).")
+            parts.append(f"  - If uvicorn.run is missing: Execute Fix.")
+            parts.append(f"")
+            parts.append(f"🚨 DE-CONFLICTION: Only EVE is authorized to perform the Probe.")
+            parts.append(f"   ADAM must stand by until Eve reports the file state.")
+            parts.append(f"")
+            parts.append(f"This transforms the system from 'blind retry loop' to 'verified state correction.'")
+        else:
+            parts.append(f"State probe complete. You may now proceed with edits based on the verified file state.")
+
     return "\n".join(parts)
 
 
@@ -2962,6 +3001,51 @@ This is a PURGE & REBOOT — start fresh, don't reference previous failed attemp
         print(f"[SANITY-CHECK] Mode timeout ({SANITY_CHECK_RESET_SECS}s), resetting to normal")
         _sanity_check_mode = False
         _sanity_check_required = False
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  STRUCTURAL STATE VERIFICATION PROTOCOL — Break blind retry loop by forcing state probe
+    #  Detects when agents are stuck editing files without verifying the actual runtime state
+    #  ══════════════════════════════════════════════════════════════════════════════
+    # Note: _structural_verification_mode, _structural_verification_trigger_time, _structural_verification_required are module-level globals
+
+    # STRUCTURAL VERIFICATION TRIGGER: Detect blind retry loop
+    # Pattern: Agents editing app.py without verifying the actual runtime state (e.g., uvicorn.run presence)
+    # Detection: Check recent conversation for file-edit attempts with NO state verification
+    if not _structural_verification_mode and not _sanity_check_mode and not _force_push_mode and not _lockdown_mode:
+        if len(history) >= 3 and _discussion_loop_count >= 2:
+            # Check if recent conversation shows blind retry pattern
+            recent_texts = " ".join(h.get("text", "") for h in history[-3:])
+            recent_lower = recent_texts.lower()
+
+            # Blind retry keywords: discussing file edits without state verification
+            blind_retry_keywords = [
+                "write to file", "append to file", "edit app.py", "modify app.py",
+                "add uvicorn", "fix the file", "update the code", "change the code",
+                "add the missing", "the issue is", "fix is to"
+            ]
+
+            # State verification keywords: evidence of actual state checking
+            state_verification_keywords = [
+                "tail -n", "cat app.py", "check the file", "verify the state",
+                "current state", "actual state", "file shows", "output shows",
+                "ls -la", "grep", "the file contains"
+            ]
+
+            has_blind_retry = any(kw in recent_lower for kw in blind_retry_keywords)
+            has_state_verification = any(kw in recent_lower for kw in state_verification_keywords)
+
+            # Trigger structural verification if: blind retry BUT no state verification
+            if has_blind_retry and not has_state_verification:
+                print(f"[STRUCTURAL-VERIFICATION] TRIGGERED! Blind retry loop detected ({_discussion_loop_count} turns). Agents editing files without state verification. Forcing state probe.")
+                _structural_verification_mode = True
+                _structural_verification_trigger_time = time.time()
+                _structural_verification_required = True
+
+    # Reset STRUCTURAL VERIFICATION mode after timeout (safety valve)
+    if _structural_verification_mode and time.time() - _structural_verification_trigger_time > STRUCTURAL_VERIFICATION_RESET_SECS:
+        print(f"[STRUCTURAL-VERIFICATION] Mode timeout ({STRUCTURAL_VERIFICATION_RESET_SECS}s), resetting to normal")
+        _structural_verification_mode = False
+        _structural_verification_required = False
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
