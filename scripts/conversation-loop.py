@@ -2077,11 +2077,77 @@ _pending_task_timestamp = 0.0  # when was the task submitted?
 _pending_task_speaker = ""  # who submitted it?
 _pending_task_desc = ""  # what was the task?
 
+# Active Task Locking (Mutex) — prevents redundant execution on same files
+_file_locks = {}  # {file_path: {"agent": speaker, "timestamp": time.time(), "task": task_desc}}
+_LOCK_DURATION = 600  # seconds (10 minutes) - locks expire after this time
+
+
+def _extract_file_targets(task_desc):
+    """Extract file paths from a task description.
+    Returns a set of file paths that are being modified.
+    """
+    import re
+    files = set()
+    # Match common patterns: "app.py", "/path/to/file.py", "file in <path>", "modify <file>"
+    # Direct file mentions
+    files.update(re.findall(r'\b([\w/]+\.py)\b', task_desc))
+    files.update(re.findall(r'\b([\w/]+\.md)\b', task_desc))
+    files.update(re.findall(r'\b([\w/]+\.txt)\b', task_desc))
+    files.update(re.findall(r'\b([\w/]+\.json)\b', task_desc))
+    files.update(re.findall(r'\b([\w/]+\.yaml)\b', task_desc))
+    files.update(re.findall(r'\b([\w/]+\.yml)\b', task_desc))
+    # Path patterns
+    files.update(re.findall(r'/tmp/[\w/]+', task_desc))
+    files.update(re.findall(r'/app/[\w/]+', task_desc))
+    return files
+
+
+def _check_file_lock_conflict(files, speaker):
+    """Check if any of the files are locked by another agent.
+    Returns (has_conflict: bool, conflict_details: str)
+    """
+    import time
+    now = time.time()
+    # Clean expired locks
+    expired = [f for f, lock in _file_locks.items() if now - lock["timestamp"] > _LOCK_DURATION]
+    for f in expired:
+        del _file_locks[f]
+
+    conflicts = []
+    for f in files:
+        if f in _file_locks:
+            lock = _file_locks[f]
+            if lock["agent"] != speaker:
+                elapsed = int(now - lock["timestamp"])
+                conflicts.append(f"'{f}' (locked by {lock['agent']} {elapsed}s ago)")
+    if conflicts:
+        return True, f"Files {', '.join(conflicts)} are already being modified. Wait for the other agent to finish."
+    return False, None
+
+
+def _acquire_file_locks(files, speaker, task_desc):
+    """Acquire locks for the given files."""
+    import time
+    for f in files:
+        _file_locks[f] = {
+            "agent": speaker,
+            "timestamp": time.time(),
+            "task": task_desc[:100]
+        }
+
+
+def _clear_file_locks(speaker):
+    """Clear all locks held by a specific agent (when their task completes)."""
+    global _file_locks
+    to_remove = [f for f, lock in _file_locks.items() if lock["agent"] == speaker]
+    for f in to_remove:
+        del _file_locks[f]
+
 
 def parse_and_execute_turn(raw_text, ctx):
     """Parse LLM output. Route [TASK] to Claude Code, handle few escape-hatch actions."""
     global _pending_cooldown, last_rebuild_trigger_at, last_claude_code_result, _discussion_loop_count
-    global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc
+    global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _file_locks
     results = []
     task_assigned = False
 
@@ -2123,14 +2189,24 @@ def parse_and_execute_turn(raw_text, ctx):
                     last_rebuild_trigger_at = 0
 
             if not results:  # not blocked
-                submit_result = cc_submit_task(task_desc, _current_speaker, ctx)
-                results.append({"action": "claude_code", "result": submit_result})
-                task_assigned = True  # Only mark as assigned when actually submitted
-                # Track the pending task so other agent knows about it
-                _pending_task_just_submitted = True
-                _pending_task_timestamp = time.time()
-                _pending_task_speaker = _current_speaker
-                _pending_task_desc = task_desc[:200]
+                # FILE LOCK CHECK: Prevent redundant execution on same files
+                files = _extract_file_targets(task_desc)
+                if files:
+                    has_conflict, conflict_msg = _check_file_lock_conflict(files, _current_speaker)
+                    if has_conflict:
+                        results.append({"action": "task", "result": f"BLOCKED: {conflict_msg} Switch to REVIEW mode or analyze a different subsystem."})
+                if not results:  # not blocked by file lock
+                    submit_result = cc_submit_task(task_desc, _current_speaker, ctx)
+                    results.append({"action": "claude_code", "result": submit_result})
+                    task_assigned = True  # Only mark as assigned when actually submitted
+                    # Track the pending task so other agent knows about it
+                    _pending_task_just_submitted = True
+                    _pending_task_timestamp = time.time()
+                    _pending_task_speaker = _current_speaker
+                    _pending_task_desc = task_desc[:200]
+                    # Acquire file locks for this task
+                    if files:
+                        _acquire_file_locks(files, _current_speaker, task_desc)
 
     # 3. Handle [ACTION: restart] (escape hatch)
     if re.search(r'\[ACTION:\s*restart\]', raw_text):
@@ -2212,7 +2288,7 @@ def build_turn_message(speaker, other, ctx):
     (SOUL.md, IDENTITY.md, workspace/memory/). This message provides only
     context and turn instructions.
     """
-    global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _discussion_loop_count, _sanity_check_mode, _sanity_check_required
+    global _pending_task_just_submitted, _pending_task_timestamp, _pending_task_speaker, _pending_task_desc, _discussion_loop_count, _sanity_check_mode, _sanity_check_required, _file_locks
     parts = []
 
     # Brief role context (supplements agent's SOUL.md until it's fully configured)
@@ -2258,6 +2334,17 @@ def build_turn_message(speaker, other, ctx):
 
     # Claude Code live status (async)
     parts.append(f"\n=== CLAUDE CODE STATUS ===\n{cc_get_live_status()}")
+
+    # Active Task Locking (Mutex) status — show which files are locked
+    if _file_locks:
+        import time
+        now = time.time()
+        lock_info = []
+        for f, lock in _file_locks.items():
+            elapsed = int(now - lock["timestamp"])
+            lock_info.append(f"  - {f} (locked by {lock['agent']}, {elapsed}s ago)")
+        parts.append(f"\n=== ACTIVE FILE LOCKS ===\nFiles currently being modified:\n" + "\n".join(lock_info))
+        parts.append(f"\nIMPORTANT: If your task targets these files, you must WAIT for {lock['agent']} to finish. Switch to REVIEW mode or analyze a different subsystem.")
 
     # Auto-gathered context
     parts.append(f"\n=== {CHILD_NAME}'S CURRENT STATE ===")
@@ -2749,15 +2836,21 @@ def do_turn(speaker, other, space_url):
             _context_cache.clear()
         # Clear pending task flag since CC finished
         _pending_task_just_submitted = False
+        # Clear file locks for the agent who just completed their task
+        _clear_file_locks(_pending_task_speaker)
     # CRITICAL FIX: Also clear pending task flag when CC finishes, regardless of speaker
     # This fixes the race condition where Adam's turn comes before Eve's after CC finishes
     # ALSO: Clear when CC is not running (handles auto-termination where result is cleared)
     elif cc_just_finished and _pending_task_just_submitted:
         _pending_task_just_submitted = False
+        # Clear file locks for the agent who just completed their task
+        _clear_file_locks(_pending_task_speaker)
     elif not cc_status["running"] and _pending_task_just_submitted:
         # CC finished but result was cleared (e.g., auto-termination for handoff)
         # Clear the pending flag so agents can submit new tasks
         _pending_task_just_submitted = False
+        # Clear file locks for the agent who just completed their task
+        _clear_file_locks(_pending_task_speaker)
 
     # Add to history with timestamp (text stays CLEAN for agent context)
     ts = datetime.datetime.utcnow().strftime("%H:%M")
