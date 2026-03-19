@@ -808,6 +808,13 @@ def action_claude_code(task):
             text=True,
             bufsize=1,
         )
+        # Register worker heartbeat
+        global _worker_heartbeat
+        _worker_heartbeat["cain"]["pid"] = proc.pid
+        _worker_heartbeat["cain"]["status"] = "running"
+        _worker_heartbeat["cain"]["last_heartbeat"] = time.time()
+        print(f"[HEARTBEAT] Cain worker spawned (pid={proc.pid})")
+
         output_lines = []
         deadline = time.time() + CLAUDE_TIMEOUT
         # Use select to implement timeout on read (handles hanging processes with no output)
@@ -824,12 +831,16 @@ def action_claude_code(task):
                             print(f"  [CC] {line}")
                             output_lines.append(line)
                             cc_live_lines.append(line)
+                _worker_heartbeat["cain"]["status"] = "exited"
+                print(f"[HEARTBEAT] Cain worker exited (pid={proc.pid}, exit={proc.returncode})")
                 break
             # Check timeout
             if time.time() > deadline:
                 proc.kill()
                 output_lines.append("(killed: timeout)")
                 proc.wait(timeout=10)
+                _worker_heartbeat["cain"]["status"] = "killed"
+                print(f"[HEARTBEAT] Cain worker killed (timeout)")
                 break
             # Wait for output with timeout (1 second polling)
             try:
@@ -843,6 +854,8 @@ def action_claude_code(task):
                         print(f"  [CC] {line}")
                         output_lines.append(line)
                         cc_live_lines.append(line)
+                        # Emit heartbeat on each output line (telemetry)
+                        _worker_heartbeat["cain"]["last_heartbeat"] = time.time()
             except select.error:
                 break
         output = '\n'.join(output_lines)
@@ -915,6 +928,14 @@ _last_cc_snapshot = ""              # tracks whether CC output changed between t
 _cc_stale_count = 0                 # how many turns CC output hasn't changed
 _last_cc_output_time = 0.0          # timestamp of last NEW CC output line
 CC_STUCK_TIMEOUT = 180              # seconds with no new output before CC is considered STUCK
+
+# ── Worker Telemetry & Heartbeat (Project Icarus) ───────────────────────────
+# Track worker health via heartbeat events
+_worker_heartbeat = {
+    "cain": {"last_heartbeat": 0.0, "status": "idle", "pid": None},
+    "god": {"last_heartbeat": 0.0, "status": "idle", "pid": None},
+}
+WORKER_HEARTBEAT_TIMEOUT = 30  # seconds before triggering diagnostic review
 
 
 def cc_submit_task(task, assigned_by, ctx):
@@ -1018,6 +1039,13 @@ def action_claude_code_god(task):
             cwd=GOD_WORK_DIR, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
+        # Register God worker heartbeat
+        global _worker_heartbeat
+        _worker_heartbeat["god"]["pid"] = proc.pid
+        _worker_heartbeat["god"]["status"] = "running"
+        _worker_heartbeat["god"]["last_heartbeat"] = time.time()
+        print(f"[HEARTBEAT] God worker spawned (pid={proc.pid})")
+
         output_lines = []
         deadline = time.time() + GOD_TIMEOUT
         _last_output_time = time.time()
@@ -1030,11 +1058,15 @@ def action_claude_code_god(task):
                         if line:
                             print(f"  [God/CC] {line}")
                             output_lines.append(line)
+                _worker_heartbeat["god"]["status"] = "exited"
+                print(f"[HEARTBEAT] God worker exited (pid={proc.pid}, exit={proc.returncode})")
                 break
             if time.time() > deadline:
                 proc.kill()
                 output_lines.append("(killed: timeout)")
                 proc.wait(timeout=10)
+                _worker_heartbeat["god"]["status"] = "killed"
+                print(f"[HEARTBEAT] God worker killed (timeout)")
                 break
             if time.time() - _last_output_time > 180:
                 proc.kill()
@@ -1043,6 +1075,8 @@ def action_claude_code_god(task):
                     proc.wait(timeout=5)
                 except:
                     pass
+                _worker_heartbeat["god"]["status"] = "stalled"
+                print(f"[HEARTBEAT] God worker stalled")
                 break
             try:
                 ready, _, _ = select.select([proc.stdout], [], [], 1.0)
@@ -1055,6 +1089,8 @@ def action_claude_code_god(task):
                         print(f"  [God/CC] {line}")
                         output_lines.append(line)
                         _last_output_time = time.time()
+                        # Emit heartbeat on each output line (telemetry)
+                        _worker_heartbeat["god"]["last_heartbeat"] = time.time()
             except select.error:
                 break
         output = '\n'.join(output_lines)
@@ -1563,6 +1599,51 @@ def check_and_restart_unhealthy_agents():
                 print(f"[A2A-HEALTH] ✅ Restarted {agent.capitalize()} Space")
             except Exception as e:
                 print(f"[A2A-HEALTH] ❌ Failed to restart {agent.capitalize()}: {e}", file=sys.stderr)
+
+    return triggered
+
+
+def check_worker_heartbeat_health():
+    """Check worker heartbeat telemetry and trigger diagnostic review if missed (>30s).
+
+    Project Icarus: Telemetry-First execution model.
+    - Monitors Cain and God workers via heartbeat events
+    - Triggers diagnostic review if no heartbeat for >30s while worker is running
+    - Returns True if diagnostic review was triggered
+    """
+    global _worker_heartbeat
+    now = time.time()
+    triggered = False
+
+    for worker_name, worker_data in _worker_heartbeat.items():
+        # Only check if worker is marked as running
+        if worker_data["status"] != "running":
+            continue
+
+        last_hb = worker_data["last_heartbeat"]
+        time_since_hb = now - last_hb
+
+        # Check if heartbeat timeout exceeded
+        if time_since_hb > WORKER_HEARTBEAT_TIMEOUT:
+            pid = worker_data.get("pid", "unknown")
+            print(f"[HEARTBEAT] ⚠ {worker_name.capitalize()} worker (pid={pid}) missed heartbeat for {time_since_hb:.0f}s", file=sys.stderr)
+            print(f"[HEARTBEAT] Triggering diagnostic review for {worker_name.capitalize()} worker...")
+
+            # Trigger diagnostic review - inject into history for next agent to see
+            diagnostic_msg = (
+                f"[DIAGNOSTIC REVIEW] {worker_name.capitalize()} worker appears stuck (no heartbeat for {time_since_hb:.0f}s, "
+                f"pid={pid}). This may indicate: 1) Process hung on I/O, 2) Deadlock, 3) Resource exhaustion. "
+                f"Consider killing the worker and retrying with a simpler task."
+            )
+
+            # Add to history so agents see it
+            ts = datetime.datetime.utcnow().strftime("%H:%M")
+            entry = {"speaker": "System", "time": ts, "text": diagnostic_msg, "text_zh": diagnostic_msg}
+            history.append(entry)
+
+            # Mark worker as stale to prevent repeated triggers
+            worker_data["status"] = "stale"
+            triggered = True
 
     return triggered
 
@@ -2659,6 +2740,12 @@ while True:
         check_and_restart_unhealthy_agents()
     except Exception as e:
         print(f"[A2A-HEALTH] Error checking health: {e}", file=sys.stderr)
+
+    # Check worker heartbeat telemetry (Project Icarus)
+    try:
+        check_worker_heartbeat_health()
+    except Exception as e:
+        print(f"[HEARTBEAT] Error checking worker health: {e}", file=sys.stderr)
 
     # CORRUPTED CONVERSATION RESET: Detect and reset poisoned conversation history
     # Symptoms: empty messages, messages ending with "-" (cut off), repeated emergency loops
