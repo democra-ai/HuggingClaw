@@ -2200,6 +2200,54 @@ RULES:
 - CONFIG_ERROR with collision = [ACTION: delete_env:KEY] then [ACTION: restart]
 - English first, then --- separator, then Chinese translation""")
 
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  CONVERGENCE PHASE: Elect lead agent to synthesize peer input and dispatch Worker
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Trigger: 2+ turns of discussion without [TASK] while CC is IDLE
+    # This prevents the "Split-Brain" problem where agents discuss in parallel without convergence
+    global _force_push_mode, _force_push_skip_termination, _emergency_override_active
+    if _discussion_loop_count >= 2 and not cc_status["running"] and not _force_push_mode:
+        # Elect lead agent based on problem domain
+        # Adam: DevOps/infrastructure (config, entry points, deployment, env vars)
+        # Eve: Code/QA (runtime errors, HTTP status, crash loops, application logic)
+        is_devops_issue = any(kw in str(ctx).lower() for kw in [
+            "startup", "entry point", "docker", "config", "environment", "deployment",
+            "build", "infrastructure", "sdk", "port", "uvicorn", "fastapi"
+        ])
+        is_runtime_issue = any(kw in str(ctx).lower() for kw in [
+            "http", "503", "502", "crash", "error", "exception", "runtime",
+            "traceback", "failed", "timeout", "connection"
+        ])
+
+        # Elect lead agent
+        if is_devops_issue and not is_runtime_issue:
+            lead_agent = "Adam"
+            lead_role = "DevOps Architect"
+        elif is_runtime_issue:
+            lead_agent = "Eve"
+            lead_role = "Runtime Verifier"
+        else:
+            # Default: alternate based on current speaker
+            lead_agent = speaker
+            lead_role = "Lead Architect"
+
+        if speaker == lead_agent:
+            parts.append(f"\n🔄🔄🔄 CONVERGENCE PHASE — YOU ARE THE LEAD ARCHITECT 🔄🔄🔄")
+            parts.append(f"Agents have been discussing for {_discussion_loop_count} turns without dispatching the Worker.")
+            parts.append(f"As the {lead_role}, you MUST:")
+            parts.append(f"1. SYNTHESIZE: Review your partner's hypothesis from the conversation history")
+            parts.append(f"2. VERIFY: Identify the specific file/line/function that needs fixing")
+            parts.append(f"3. DISPATCH: Write [TASK]...[/TASK] with concrete changes — file paths, function names, exact fixes")
+            parts.append(f"🛑 STOP discussing. Your job is to CLOSE THE FEEDBACK LOOP by dispatching the Worker.")
+            parts.append(f"The system is 'all talk, no code.' BE the Logic Synthesizer. WRITE [TASK] NOW.")
+        else:
+            parts.append(f"\n🔄🔄🔄 CONVERGENCE PHASE — PARTNER IS LEAD 🔄🔄🔄")
+            parts.append(f"Agents have been discussing for {_discussion_loop_count} turns without dispatching the Worker.")
+            parts.append(f"{lead_agent} is the Lead Architect for this cycle ({lead_role} domain).")
+            parts.append(f"YOUR ROLE: Provide a concise summary of your hypothesis (max 3 sentences).")
+            parts.append(f"DO NOT write [TASK]. Let {lead_agent} synthesize and dispatch.")
+            parts.append(f"Focus on: What specific evidence supports your theory? What files/lines should be checked?")
+
     # CHATTER DETECTION: Check if last 3 messages are pure discussion without [TASK] or code
     # If agents are stuck in conversational loops, force them to act
     if len(history) >= 3 and not cc_status["running"]:
@@ -2220,7 +2268,6 @@ RULES:
 
     # EMERGENCY OVERRIDE PROTOCOL: PUSH_ONLY mode for breaking discussion loops
     # When triggered, force agents to generate a task regardless of CC status
-    global _force_push_mode, _force_push_skip_termination, _emergency_override_active
     if _force_push_mode:
         parts.append(f"\n🚨🚨🚨 EMERGENCY OVERRIDE: PUSH_ONLY MODE 🚨🚨🚨")
         parts.append(f"Discussion loop detected with ZERO pushes. You MUST write a [TASK]...[/TASK] this turn.")
