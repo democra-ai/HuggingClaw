@@ -145,6 +145,16 @@ MAX_IDLE_TURNS = 3  # Trigger emergency override after this many idle turns with
 MAX_TURNS_WITHOUT_PUSH = 8  # Trigger emergency override after this many turns without ANY push (catches "1 push then 20 turns discussion" anti-pattern)
 _emergency_override_active = False  # When True, safety throttles are ignored
 
+# LOCKDOWN Mode — "Purge & Reboot" for Stalemate State
+# Detects when Cain is stuck in ERROR state for too long without effective pushes
+# and forces a hard reset: terminate CC, clear conversation, force fresh diagnostic
+_lockdown_mode = False  # When True, in purge & reboot state
+_lockdown_trigger_time = 0.0  # When LOCKDOWN was triggered
+_lockdown_error_onset = 0.0  # Timestamp when Cain first entered ERROR state
+_lockdown_push_count_at_error = 0  # Push count when error started (to detect if any pushes happened during error)
+LOCKDOWN_ERROR_THRESHOLD_SECS = 600  # 10 minutes in error state without effective pushes triggers LOCKDOWN
+LOCKDOWN_RESET_SECS = 180  # 3 minutes — LOCKDOWN lasts this long before returning to normal
+
 def _init_push_count_from_workspace():
     """Initialize push count from existing workspace commits.
     This persists push tracking across conversation loop restarts."""
@@ -2710,6 +2720,79 @@ while True:
         _force_push_mode = False
         _emergency_override_active = False
         _force_push_skip_termination = False
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  LOCKDOWN MODE — "Purge & Reboot" for Stalemate State
+    #  Detects when Cain is stuck in ERROR state for too long without effective pushes.
+    #  Triggers hard reset: terminate CC, clear conversation, force fresh diagnostic.
+    # ══════════════════════════════════════════════════════════════════════════════
+
+    # Track error state onset
+    child_in_error = child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR")
+    if child_in_error and _lockdown_error_onset == 0:
+        # Cain just entered error state — record when it started
+        _lockdown_error_onset = time.time()
+        _lockdown_push_count_at_error = _push_count
+        print(f"[LOCKDOWN] Cain entered ERROR state at {datetime.datetime.utcnow().strftime('%H:%M:%S')} UTC, push_count={_push_count}")
+    elif not child_in_error:
+        # Cain recovered — reset error tracking
+        if _lockdown_error_onset != 0:
+            print(f"[LOCKDOWN] Cain recovered from ERROR state, resetting error tracking")
+        _lockdown_error_onset = 0
+        _lockdown_push_count_at_error = 0
+
+    # LOCKDOWN TRIGGER: Error state persists too long WITHOUT effective pushes
+    # "Effective push" means _push_count increased since error started
+    if not _lockdown_mode and child_in_error and _lockdown_error_onset > 0:
+        error_duration = time.time() - _lockdown_error_onset
+        pushes_during_error = _push_count - _lockdown_push_count_at_error
+
+        # Trigger if: (a) error duration > threshold AND (b) no effective pushes during error
+        if error_duration > LOCKDOWN_ERROR_THRESHOLD_SECS and pushes_during_error == 0:
+            print(f"[LOCKDOWN] TRIGGERED! Cain in ERROR for {int(error_duration)}s with ZERO effective pushes. System in STALEMATE — initiating PURGE & REBOOT.")
+            _lockdown_mode = True
+            _lockdown_trigger_time = time.time()
+
+            # LOCKDOWN ACTION: Hard reset
+            # 1. Force-terminate CC if running
+            if cc_status["running"]:
+                print(f"[LOCKDOWN] Terminating stuck CC process...")
+                action_terminate_cc()
+
+            # 2. Clear conversation history (purge corrupted context)
+            print(f"[LOCKDOWN] Clearing conversation history to purge stale context...")
+            history = []
+            _discussion_loop_count = 0
+
+            # 3. Post cleared chatlog to frontend
+            try:
+                post_chatlog(history)
+                print(f"[LOCKDOWN] Conversation history purged")
+            except Exception as e:
+                print(f"[LOCKDOWN] Failed to post cleared chatlog: {e}")
+
+            # 4. Force a fresh diagnostic task to break the stalemate
+            print(f"[LOCKDOWN] Forcing fresh diagnostic task...")
+            ctx = gather_context()
+            forced_task = f"""EMERGENCY LOCKDOWN REBOOT: Cain has been in {child_state['stage']} for {int(error_duration)}s with zero effective fixes. The system is in STALEMATE.
+
+CRITICAL INSTRUCTIONS:
+1. DIAGNOSE the root cause of the error immediately — check logs, error messages, runtime state
+2. Do NOT discuss — write [TASK] with a SPECIFIC fix immediately
+3. Trial-and-error is REQUIRED — push a fix attempt, don't deliberate
+4. If unsure what's wrong, the priority is getting Cain RUNNING — try the most likely fix
+
+Current stage: {child_state['stage']}
+Error duration: {int(error_duration)}s
+This is a PURGE & REBOOT — start fresh, don't reference previous failed attempts."""
+            cc_submit_task(forced_task, "LOCKDOWN", ctx)
+
+    # Reset LOCKDOWN mode after timeout (safety valve)
+    if _lockdown_mode and time.time() - _lockdown_trigger_time > LOCKDOWN_RESET_SECS:
+        print(f"[LOCKDOWN] Mode timeout ({LOCKDOWN_RESET_SECS}s), resetting to normal")
+        _lockdown_mode = False
+        _lockdown_error_onset = 0
+        _lockdown_push_count_at_error = 0
 
     # Note: Aggressive CC auto-termination based on push frequency is removed.
     # God monitors push frequency and proposes mechanism fixes when needed.
