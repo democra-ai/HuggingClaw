@@ -5667,13 +5667,19 @@ function toggleBrokerPanel() {
                 .then(r => r.json())
                 .then(data => {
                     const msgs = data.messages || [];
-                    if (msgs.length === lastChatlogLen) return;
+                    if (msgs.length === 0 && lastChatlogLen === 0) return;
+                    // Compare last message to detect content changes (not just length)
+                    const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+                    const prevLast = chatlogCache.length > 0 ? chatlogCache[chatlogCache.length - 1] : null;
+                    if (msgs.length === lastChatlogLen && lastMsg && prevLast &&
+                        lastMsg.speaker === prevLast.speaker && lastMsg.time === prevLast.time) return;
                     lastChatlogLen = msgs.length;
                     chatlogCache = msgs;
                     renderChatlog();
                 })
                 .catch(() => {});
         }
+        fetchChatlog(); // Load immediately on page open
         setInterval(fetchChatlog, 5000);
 
         function fetchStatus() {
