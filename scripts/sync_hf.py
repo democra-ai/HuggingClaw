@@ -66,16 +66,6 @@ APP_DIR       = Path("/app/openclaw")
 # Use ".openclaw" - directly read/write the .openclaw folder in dataset
 DATASET_PATH = ".openclaw"
 
-# OpenAI-compatible API (OpenAI, OpenRouter, or any compatible endpoint)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-
-# OpenRouter API key (optional; alternative to OPENAI_API_KEY + OPENAI_BASE_URL)
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-
-# Zhipu AI (z.ai) API key (optional; GLM-4 series, Anthropic-compatible endpoint)
-ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
-
 # Z.AI API key (optional; used by Claude Code backend via api.z.ai)
 ZAI_API_KEY = os.environ.get("ZAI_API_KEY", "")
 
@@ -86,12 +76,8 @@ GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "huggingclaw")
 AGENT_NAME = os.environ.get("AGENT_NAME", "HuggingClaw")
 A2A_PEERS = os.environ.get("A2A_PEERS", "")  # comma-separated peer URLs
 
-# Default model for new conversations (infer from provider if not set)
-OPENCLAW_DEFAULT_MODEL = os.environ.get("OPENCLAW_DEFAULT_MODEL") or (
-    "openai/gpt-5-nano" if OPENAI_API_KEY
-    else "zhipu/glm-4.5-air" if ZHIPU_API_KEY
-    else "openrouter/openai/gpt-oss-20b:free"
-)
+# Default model — only set if user explicitly provides it; otherwise let OpenClaw decide.
+OPENCLAW_DEFAULT_MODEL = os.environ.get("OPENCLAW_DEFAULT_MODEL", "")
 
 # HF Spaces built-in env vars (auto-set by HF runtime)
 SPACE_HOST = os.environ.get("SPACE_HOST", "")   # e.g. "tao-shen-huggingclaw.hf.space"
@@ -363,20 +349,13 @@ class OpenClawFullSync:
                 # Set gateway token
                 if "gateway" in cfg:
                     cfg["gateway"]["auth"] = {"token": GATEWAY_TOKEN}
-                if OPENAI_API_KEY and "models" in cfg and "providers" in cfg["models"] and "openai" in cfg["models"]["providers"]:
-                    cfg["models"]["providers"]["openai"]["apiKey"] = OPENAI_API_KEY
-                    if OPENAI_BASE_URL:
-                        cfg["models"]["providers"]["openai"]["baseUrl"] = OPENAI_BASE_URL
-                elif "models" in cfg and "providers" in cfg["models"]:
-                    if not OPENAI_API_KEY:
-                        cfg["models"]["providers"].pop("openai", None)
-                if OPENROUTER_API_KEY:
-                    if "models" in cfg and "providers" in cfg["models"] and "openrouter" in cfg["models"]["providers"]:
-                        cfg["models"]["providers"]["openrouter"]["apiKey"] = OPENROUTER_API_KEY
-                else:
-                    if "models" in cfg and "providers" in cfg["models"]:
-                        cfg["models"]["providers"].pop("openrouter", None)
-                    print("[SYNC] No OPENROUTER_API_KEY — removed openrouter provider from config")
+                # Don't manage providers — leave them for OpenClaw to handle.
+                # Just remove template entries with unresolved ${...} placeholders
+                # so OpenClaw starts clean and discovers providers from env vars.
+                providers = cfg.get("models", {}).get("providers", {})
+                for pid in list(providers.keys()):
+                    if str(providers[pid].get("apiKey", "")).startswith("${"):
+                        providers.pop(pid, None)
                 with open(config_path, "w") as f:
                     json.dump(cfg, f, indent=2)
             except Exception as e:
@@ -396,7 +375,6 @@ class OpenClawFullSync:
                         }
                     },
                     "session": {"scope": "global"},
-                    "models": {"mode": "merge", "providers": {}},
                     "agents": {"defaults": {"workspace": "~/.openclaw/workspace"}}
                 }, f)
             print("[SYNC] Created minimal openclaw.json")
@@ -469,44 +447,30 @@ class OpenClawFullSync:
             data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
             data.setdefault("session", {})["scope"] = "global"
 
-            # Build providers from scratch — only include providers with active API keys.
-            # This ensures removed secrets don't leave stale providers from backup.
-            providers = {}
-            if OPENAI_API_KEY:
-                providers["openai"] = {
-                    "baseUrl": OPENAI_BASE_URL,
-                    "apiKey": OPENAI_API_KEY,
-                    "api": "openai-completions",
-                }
-                print(f"[SYNC] Set OpenAI-compatible provider (baseUrl={OPENAI_BASE_URL})")
-            if OPENROUTER_API_KEY:
-                providers["openrouter"] = {
-                    "baseUrl": "https://openrouter.ai/api/v1",
-                    "apiKey": OPENROUTER_API_KEY,
-                    "api": "openai-completions",
-                    "models": [
-                        {"id": "openai/gpt-oss-20b:free", "name": "GPT-OSS-20B (Free)"},
-                        {"id": "deepseek/deepseek-chat:free", "name": "DeepSeek V3 (Free)"}
-                    ]
-                }
-                print("[SYNC] Set OpenRouter provider")
-            if ZHIPU_API_KEY:
-                providers["zhipu"] = {
-                    "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-                    "apiKey": ZHIPU_API_KEY,
-                    "api": "anthropic-messages",
-                    "models": [
-                        {"id": "glm-4.5-air", "name": "GLM-4.5 Air"},
-                        {"id": "glm-4.5", "name": "GLM-4.5"},
-                        {"id": "glm-4.6", "name": "GLM-4.6"},
-                        {"id": "glm-4.7", "name": "GLM-4.7"},
-                    ]
-                }
-                print("[SYNC] Set Zhipu AI provider")
-            if not providers:
-                print("[SYNC] WARNING: No API key set (OPENAI/OPENROUTER/ZHIPU), LLM features may not work")
-            data.setdefault("models", {})["providers"] = providers
-            data["agents"]["defaults"]["model"]["primary"] = OPENCLAW_DEFAULT_MODEL
+            # ── Provider cleanup ─────────────────────────────────────────────
+            # Don't manage providers — let OpenClaw handle them natively from
+            # its own env var support. We only clean up stale providers that
+            # were restored from the dataset backup with hardcoded API keys
+            # that no longer exist in the current environment.
+            restored_providers = data.get("models", {}).get("providers", {})
+            if restored_providers:
+                stale = []
+                for pid, pcfg in list(restored_providers.items()):
+                    api_key = pcfg.get("apiKey", "")
+                    # Skip placeholder-style keys (${VAR}) — OpenClaw resolves these
+                    if not api_key or str(api_key).startswith("${"):
+                        continue
+                    # Hardcoded key from backup — check if it's still in env
+                    # We can't know which env var it came from, so check if
+                    # the exact key value exists in any current env var
+                    if api_key not in os.environ.values():
+                        stale.append(pid)
+                for pid in stale:
+                    del restored_providers[pid]
+                    print(f"[SYNC] Removed stale provider '{pid}' (API key no longer in environment)")
+
+            if OPENCLAW_DEFAULT_MODEL:
+                data["agents"]["defaults"]["model"]["primary"] = OPENCLAW_DEFAULT_MODEL
 
             # ── ACP (Agent Client Protocol) — native Claude Code integration ──
             data["acp"] = {
@@ -545,10 +509,10 @@ class OpenClawFullSync:
                         "targetSpace": CODING_TARGET_SPACE,
                         "targetDataset": CODING_TARGET_DATASET,
                         "hfToken": HF_TOKEN or "",
-                        "zaiApiKey": ZAI_API_KEY or ZHIPU_API_KEY or "",
+                        "zaiApiKey": ZAI_API_KEY or os.environ.get("ZHIPU_API_KEY", ""),
                     }
                 }
-                print(f"[SYNC] Coding agent configured: space={CODING_TARGET_SPACE}, dataset={CODING_TARGET_DATASET}, zaiKey={'set' if (ZAI_API_KEY or ZHIPU_API_KEY) else 'missing'}")
+                print(f"[SYNC] Coding agent configured: space={CODING_TARGET_SPACE}, dataset={CODING_TARGET_DATASET}, zaiKey={'set' if (ZAI_API_KEY or os.environ.get('ZHIPU_API_KEY')) else 'missing'}")
             if "telegram" not in data["plugins"]["entries"]:
                 data["plugins"]["entries"]["telegram"] = {"enabled": True}
             elif isinstance(data["plugins"]["entries"]["telegram"], dict):
@@ -689,19 +653,8 @@ class OpenClawFullSync:
         # Open log file
         log_fh = open(log_file, "a")
 
-        # Prepare environment (all API keys passed through for OpenClaw)
+        # Pass entire environment to OpenClaw (all API keys are already in os.environ)
         env = os.environ.copy()
-        if OPENAI_API_KEY:
-            env["OPENAI_API_KEY"] = OPENAI_API_KEY
-            env["OPENAI_BASE_URL"] = OPENAI_BASE_URL
-        if OPENROUTER_API_KEY:
-            env["OPENROUTER_API_KEY"] = OPENROUTER_API_KEY
-        if ZHIPU_API_KEY:
-            env["ZHIPU_API_KEY"] = ZHIPU_API_KEY
-        if ZAI_API_KEY:
-            env["ZAI_API_KEY"] = ZAI_API_KEY
-        if not OPENAI_API_KEY and not OPENROUTER_API_KEY and not ZHIPU_API_KEY:
-            print(f"[SYNC] WARNING: No API key set (OPENAI/OPENROUTER/ZHIPU), LLM features may not work")
 
         # ── Telegram API base probe ──────────────────────────────────────
         # Determine working Telegram API endpoint and set env var for
@@ -731,7 +684,7 @@ class OpenClawFullSync:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,  # Line buffered
-                env=env  # Pass environment with OPENROUTER_API_KEY
+                env=env  # Pass full environment (all API keys)
             )
 
             # Create a thread to copy output to log file; only print key lines to console
