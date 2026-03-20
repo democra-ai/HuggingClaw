@@ -47,7 +47,6 @@ sys.stderr.reconfigure(line_buffering=True)
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 HOME = "https://tao-shen-huggingclaw-home.hf.space"
-HOME_LOCAL = "http://localhost:7860"  # Internal calls — avoid round-tripping through HF proxy
 ADAM_SPACE = "https://tao-shen-huggingclaw-adam.hf.space"
 ADAM_SPACE_ID = "tao-shen/HuggingClaw-Adam"
 EVE_SPACE  = "https://tao-shen-huggingclaw-eve.hf.space"
@@ -1088,7 +1087,7 @@ def action_claude_code_god(task):
         ts_end = datetime.datetime.utcnow().strftime("%H:%M")
         entry = {"speaker": "God", "time": ts_end, "text": msg_en, "text_zh": msg_en}
         history.append(entry)
-        set_bubble(HOME_LOCAL, msg_en[:200], msg_en[:200])
+        set_bubble(HOME, msg_en[:200], msg_en[:200])
         post_chatlog(history)
         persist_turn("God", turn_count, msg_en, msg_en, [], workflow_state, child_state["stage"])
 
@@ -1614,10 +1613,15 @@ def parse_bilingual(text):
 
 
 def post_chatlog(entries):
+    url = f"{HOME}/api/chatlog"
     try:
-        requests.post(f"{HOME_LOCAL}/api/chatlog", json={"messages": entries[-40:]}, timeout=5)
+        resp = requests.post(url, json={"messages": entries[-40:]}, timeout=10)
+        if resp.status_code != 200:
+            print(f"[CHATLOG] POST {url} → {resp.status_code}: {resp.text[:200]}", flush=True)
+        else:
+            print(f"[CHATLOG] Posted {len(entries)} entries OK", flush=True)
     except Exception as e:
-        print(f"[CHATLOG] Failed to post chatlog: {e}", flush=True)
+        print(f"[CHATLOG] POST {url} failed: {e}", flush=True)
 
 
 # ── Persistent conversation log → HF Dataset ──────────────────────────────
@@ -1691,10 +1695,12 @@ def flush_chatlog(max_retries=2):
 
 def set_bubble(url, text_en, text_zh=""):
     try:
-        requests.post(f"{url}/api/bubble",
-                       json={"text": text_en, "text_zh": text_zh or text_en}, timeout=5)
-    except:
-        pass
+        resp = requests.post(f"{url}/api/bubble",
+                       json={"text": text_en, "text_zh": text_zh or text_en}, timeout=10)
+        if resp.status_code != 200:
+            print(f"[BUBBLE] POST {url}/api/bubble → {resp.status_code}", flush=True)
+    except Exception as e:
+        print(f"[BUBBLE] POST {url}/api/bubble failed: {e}", flush=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2523,7 +2529,7 @@ def do_god_turn_a2a():
         ts = datetime.datetime.utcnow().strftime("%H:%M")
         entry = {"speaker": "God", "time": ts, "text": en[:500], "text_zh": zh[:500]}
         history.append(entry)
-        set_bubble(HOME_LOCAL, en[:200], zh[:200])
+        set_bubble(HOME, en[:200], zh[:200])
         post_chatlog(history)
         persist_turn("God", turn_count, en, zh, [], workflow_state, child_state["stage"])
 
