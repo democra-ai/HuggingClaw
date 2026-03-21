@@ -1309,12 +1309,10 @@ def gather_context():
     # 2. Environment variables
     ctx["env"] = action_get_env()
 
-    # 3. INVASIVE DIAGNOSTICS — Fetch actual crash logs when in deadlock states
-    # This breaks the "hypothesize -> check code -> repeat" loop by providing actual runtime errors
-    if child_state["stage"] in ("RUNNING_APP_STARTING", "RUNTIME_ERROR", "BUILD_ERROR"):
-        diagnostic = _fetch_invasive_diagnostics()
-        if diagnostic:
-            ctx["invasive_diagnostics"] = diagnostic
+    # 3. Container logs — always fetch so Adam/Eve can see what Cain is doing
+    logs = _fetch_child_logs()
+    if logs:
+        ctx["child_logs"] = logs
 
     # 4. File lists (cache, refresh when stage changes)
     cache_key = f"files_{child_state['stage']}"
@@ -1331,22 +1329,19 @@ def gather_context():
     return ctx
 
 
-def _fetch_invasive_diagnostics():
-    """Fetch actual crash logs and error details from HF API.
-    Bypasses frontend/a2a-proxy to get real runtime errors.
+def _fetch_child_logs():
+    """Fetch Cain's runtime logs from HF Spaces SSE endpoint.
 
-    INVASIVE DIAGNOSTICS PROTOCOL:
-    - Retrieves stdout/stderr directly from container logs
-    - Verifies active network ports (is 8000 actually listening?)
-    - Checks for Python syntax errors in startup logs
-    - Provides GROUND TRUTH to break hypothesis loops
+    Always fetches logs regardless of stage — Adam/Eve need to see the
+    full picture to make informed decisions, not just error states.
     """
     if not child_state["created"]:
         return None
 
-    diagnostic_parts = []
+    parts = []
+
+    # 1. Runtime info (error message, stage) from HF API
     try:
-        # Fetch detailed runtime error from HF Spaces API
         rresp = requests.get(
             f"https://huggingface.co/api/spaces/{CHILD_SPACE_ID}/runtime",
             headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=10)
@@ -1354,60 +1349,76 @@ def _fetch_invasive_diagnostics():
             rdata = rresp.json()
             error_message = rdata.get("errorMessage", "")
             if error_message:
-                diagnostic_parts.append(f"=== RUNTIME ERROR MESSAGE ===\n{error_message[:2000]}")
-
-            # Also check stage and runtime info
-            stage = rdata.get("stage", "")
-            if stage:
-                diagnostic_parts.append(f"\n=== RUNTIME STAGE ===\n{stage}")
-
-            # Check if there's runtime info
-            runtime_info = rdata.get("runtime", {})
-            if runtime_info:
-                diagnostic_parts.append(f"\n=== RUNTIME INFO ===\n{str(runtime_info)[:500]}")
+                parts.append(f"=== RUNTIME ERROR ===\n{error_message[:2000]}")
     except Exception as e:
-        diagnostic_parts.append(f"=== DIAGNOSTIC FETCH ERROR ===\n{e}")
+        parts.append(f"=== RUNTIME API ERROR ===\n{e}")
 
-    # Try to fetch recent logs from the Space's exposed endpoint (if available)
+    # 2. Fetch actual container logs via HF SSE endpoint
+    #    This is the same log stream you see in the HF Space UI.
+    log_lines = []
+    for log_type in ("run", "build"):
+        try:
+            resp = requests.get(
+                f"https://huggingface.co/api/spaces/{CHILD_SPACE_ID}/logs/{log_type}",
+                headers={"Authorization": f"Bearer {HF_TOKEN}"},
+                stream=True, timeout=10)
+            if resp.status_code == 200:
+                import json as _json
+                for raw_line in resp.iter_lines(decode_unicode=True):
+                    if not raw_line or not raw_line.startswith("data:"):
+                        continue
+                    try:
+                        event = _json.loads(raw_line[5:])  # strip "data:" prefix
+                        line = event.get("data", "").rstrip()
+                        if line:
+                            log_lines.append(line)
+                    except (ValueError, KeyError):
+                        pass
+                    # Stop after collecting enough lines (SSE streams indefinitely)
+                    if len(log_lines) >= 150:
+                        break
+                resp.close()
+                if log_lines:
+                    break  # Got run logs, skip build logs
+        except Exception:
+            pass
+
+    if log_lines:
+        # Keep last 80 lines — enough context without overwhelming the prompt
+        recent = log_lines[-80:]
+        parts.append(f"=== CONTAINER LOGS (last {len(recent)} lines) ===")
+        parts.append("\n".join(recent))
+
+        # Flag obvious errors
+        error_patterns = [
+            "SyntaxError", "IndentationError", "NameError",
+            "ModuleNotFoundError", "ImportError", "KeyError",
+            "AttributeError", "TypeError", "ValueError",
+            "Traceback (most recent call last)", "Error:", "FATAL",
+        ]
+        log_text = "\n".join(recent)
+        found = [p for p in error_patterns if p in log_text]
+        if found:
+            parts.append(f"\n⚠ ERRORS DETECTED IN LOGS: {', '.join(found)}")
+    elif not parts:
+        # Fallback: try the app's own /api/logs endpoint
+        try:
+            lresp = requests.get(f"{CHILD_SPACE_URL}/api/logs", timeout=5)
+            if lresp.ok:
+                parts.append(f"=== APP LOGS (last 1500 chars) ===\n{lresp.text[-1500:]}")
+        except:
+            pass
+
+    # 3. Network check
     try:
-        lresp = requests.get(f"{CHILD_SPACE_URL}/api/logs", timeout=5)
-        if lresp.ok:
-            logs = lresp.text
-            diagnostic_parts.append(f"\n=== RECENT LOGS (last 1000 chars) ===\n{logs[-1000:]}")
-
-            # INVASIVE DIAGNOSTICS: Python syntax error detection
-            # Check for common Python syntax errors in startup logs
-            syntax_error_patterns = [
-                "SyntaxError", "IndentationError", "NameError",
-                "ModuleNotFoundError", "ImportError", "KeyError",
-                "AttributeError", "TypeError", "ValueError"
-            ]
-            logs_lower = logs.lower()
-            found_errors = []
-            for pattern in syntax_error_patterns:
-                if pattern.lower() in logs_lower:
-                    found_errors.append(pattern)
-            if found_errors:
-                diagnostic_parts.append(f"\n=== PYTHON SYNTAX ERRORS DETECTED ===\n{', '.join(found_errors)}")
-                diagnostic_parts.append(f"\nACTION REQUIRED: Check the FULL error traceback above.")
-                diagnostic_parts.append(f"Do NOT hypothesize. The traceback tells you exactly what's wrong.")
-
-    except:
-        pass  # Endpoint might not exist, that's OK
-
-    # INVASIVE DIAGNOSTICS: Network port verification
-    # Check if port 8000 (uvicorn default) is actually listening
-    try:
-        # Try to connect to the Space URL on port 80/443 (mapped to internal 7860)
-        # This verifies the container is actually accepting connections
         presp = requests.get(f"{CHILD_SPACE_URL}/", timeout=3)
-        diagnostic_parts.append(f"\n=== NETWORK STATUS ===\nHTTP {presp.status_code} - Container is responding")
+        parts.append(f"\n=== NETWORK ===\nHTTP {presp.status_code} — responding")
     except requests.exceptions.Timeout:
-        diagnostic_parts.append(f"\n=== NETWORK STATUS ===\nTIMEOUT - Port may be blocked or app not listening")
+        parts.append(f"\n=== NETWORK ===\nTIMEOUT — not responding")
     except Exception as e:
-        diagnostic_parts.append(f"\n=== NETWORK STATUS ===\nERROR - {type(e).__name__}: {str(e)[:100]}")
+        parts.append(f"\n=== NETWORK ===\n{type(e).__name__}: {str(e)[:100]}")
 
-    return "\n".join(diagnostic_parts) if diagnostic_parts else None
+    return "\n".join(parts) if parts else None
 
 
 def format_context(ctx):
@@ -1416,10 +1427,9 @@ def format_context(ctx):
     parts.append(f"=== HEALTH ===\n{ctx.get('health', 'unknown')}")
     parts.append(f"\n=== ENVIRONMENT ===\n{ctx.get('env', 'none')}")
 
-    # INVASIVE DIAGNOSTICS — Show crash logs FIRST (before file lists)
-    # This ensures agents see actual runtime errors before hypothesizing
-    if ctx.get("invasive_diagnostics"):
-        parts.append(f"\n=== INVASIVE DIAGNOSTICS (ACTUAL CRASH LOGS) ===\n{ctx['invasive_diagnostics']}")
+    # Container logs — show BEFORE file lists so agents see runtime state first
+    if ctx.get("child_logs"):
+        parts.append(f"\n{ctx['child_logs']}")
 
     if ctx.get("space_files"):
         parts.append(f"\n=== SPACE FILES ===\n{ctx['space_files'][:2000]}")
