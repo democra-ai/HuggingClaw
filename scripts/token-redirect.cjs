@@ -345,14 +345,20 @@ function handleA2ABridge(req, res) {
 
       // Step 4: Collect agent response
       if (msg.type === 'res' && msg.id && msg.id.startsWith('agent-')) {
+        console.log(`[a2a-bridge] Agent RPC response: ok=${msg.ok} payload=${JSON.stringify(msg.payload || {}).slice(0, 500)}`);
         if (msg.ok) {
-          // Extract text from agent response payload
+          // Extract text from agent response payload — try all known fields
           const p = msg.payload || {};
-          const summary = p.summary || p.text || p.message || '';
+          const summary = p.summary || p.text || p.message || p.content || '';
+          // Also check nested structures
+          if (!summary && p.messages && Array.isArray(p.messages)) {
+            const lastMsg = p.messages[p.messages.length - 1];
+            if (lastMsg && lastMsg.content) agentText = typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content);
+          }
           if (summary) agentText = summary;
-          finish(agentText || '(agent completed)');
+          finish(agentText || '(agent completed, no text in payload)');
         } else {
-          const errMsg = (msg.payload && msg.payload.message) || 'agent dispatch failed';
+          const errMsg = (msg.payload && msg.payload.message) || JSON.stringify(msg.payload || {}).slice(0, 200);
           console.log(`[a2a-bridge] Agent RPC failed: ${errMsg}`);
           finishError(`Agent dispatch failed: ${errMsg}`);
         }
@@ -362,8 +368,12 @@ function handleA2ABridge(req, res) {
       // Collect streaming events
       if (msg.type === 'event') {
         const p = msg.payload || {};
+        console.log(`[a2a-bridge] Event: ${msg.event} payload_keys=${Object.keys(p).join(',')}`);
         if (p.text) agentText += p.text;
         if (p.message) agentText += p.message;
+        // sessions.messages events contain full message objects
+        if (p.content && typeof p.content === 'string') agentText += p.content;
+        if (p.delta && typeof p.delta === 'string') agentText += p.delta;
       }
     }
   });
