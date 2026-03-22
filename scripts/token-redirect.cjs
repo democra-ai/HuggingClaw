@@ -246,15 +246,20 @@ function handleA2ABridge(req, res) {
       res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: msg } }));
     }
 
+    // Connect to OpenClaw's internal gateway port.
+    // token-redirect.cjs hooks http.Server.prototype.emit('request') but NOT
+    // 'upgrade', so WebSocket upgrades to 7860 reach OpenClaw directly.
+    // However, OpenClaw may close with 1002 if missing required headers.
     const wsReq = http.request({
       hostname: '127.0.0.1', port: 7860,
-      path: '/',
+      path: `/?token=${GATEWAY_TOKEN}`,
       method: 'GET',
       headers: {
         'Upgrade': 'websocket',
         'Connection': 'Upgrade',
         'Sec-WebSocket-Key': wsKey,
         'Sec-WebSocket-Version': '13',
+        'Origin': 'http://127.0.0.1:7860',
       }
     });
 
