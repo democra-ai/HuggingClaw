@@ -265,7 +265,12 @@ function handleA2ABridge(req, res) {
 
     wsReq.on('upgrade', (upgradeRes, socket, head) => {
       wsSocket = socket;
-      console.log('[a2a-bridge] WS connected');
+      console.log(`[a2a-bridge] WS connected, head=${head.length} bytes`);
+
+      // Process any initial data that came with the upgrade response
+      if (head && head.length > 0) {
+        socket.emit('data', head);
+      }
 
       let frameBuf = Buffer.alloc(0);
 
