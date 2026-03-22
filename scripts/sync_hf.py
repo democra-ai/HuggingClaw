@@ -430,11 +430,11 @@ class OpenClawFullSync:
                 "mode": "local",
                 "bind": "lan",
                 "port": 7860,
-                "auth": {"token": GATEWAY_TOKEN},
+                "auth": {"password": GATEWAY_TOKEN},
                 "trustedProxies": ["0.0.0.0/0"],
                 "controlUi": {
                     "allowInsecureAuth": True,
-                    "dangerouslyDisableDeviceAuth": True,
+                    "dangerouslyDisableDeviceAuth": False,
                     "allowedOrigins": allowed_origins
                 }
             }

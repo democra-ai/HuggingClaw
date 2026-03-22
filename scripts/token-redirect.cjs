@@ -337,7 +337,7 @@ function handleA2ABridge(req, res) {
         wsSend(wsSocket, JSON.stringify({
           type: 'req', id: 'connect-' + Date.now(), method: 'connect',
           params: {
-            auth: { token: GATEWAY_TOKEN },
+            auth: { password: GATEWAY_TOKEN },
             client: { id: 'gateway-client', platform: 'node', mode: 'backend', version: '1.0.0' },
             minProtocol: 3,
             maxProtocol: 3,
