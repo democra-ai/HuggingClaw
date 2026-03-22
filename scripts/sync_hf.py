@@ -642,35 +642,6 @@ class OpenClawFullSync:
         # When dangerouslyDisableDeviceAuth=true, OpenClaw clears ALL scopes
         # (including operator.write needed for A2A dispatch).
         # Fix: patch the JS files to grant full scopes instead of clearing.
-        # ── Patch OpenClaw scope bug (openclaw/openclaw#17187) ────────
-        # When dangerouslyDisableDeviceAuth=true, OpenClaw clears ALL scopes.
-        # Only patch gateway-cli-*.js files with precise context matching.
-        dist_dir = Path(APP_DIR) / "dist"
-        full_scopes = '["operator.read","operator.write","operator.admin","operator.approvals","operator.pairing"]'
-        if dist_dir.exists():
-            patched = 0
-            for js_file in dist_dir.glob("gateway-cli-*.js"):
-                try:
-                    content = js_file.read_text(errors="ignore")
-                    # Only replace scopes=[] when preceded by !device (the exact bug pattern)
-                    # Pattern in minified: if(!device){if(scopes.length>0){scopes=[];...}}
-                    import re as _re
-                    new_content = _re.sub(
-                        r'(if\s*\(\s*!device\s*\)\s*\{[^}]*?)scopes\s*=\s*\[\]',
-                        rf'\1scopes={full_scopes}',
-                        content
-                    )
-                    if new_content != content:
-                        js_file.write_text(new_content)
-                        patched += 1
-                        print(f"[SYNC] Patched {js_file.name}: !device scope-clearing → full operator scopes")
-                except Exception as e:
-                    print(f"[SYNC] Failed to patch {js_file.name}: {e}")
-            if patched:
-                print(f"[SYNC] Patched {patched} gateway-cli file(s)")
-            else:
-                print("[SYNC] No gateway-cli files matched the !device scope pattern")
-
         # Use subprocess.run with direct output, no shell pipe
         print(f"[SYNC] Launching: {' '.join(entry_cmd)}")
         print(f"[SYNC] Working directory: {APP_DIR}")
