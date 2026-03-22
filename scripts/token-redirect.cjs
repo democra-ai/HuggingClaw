@@ -304,6 +304,8 @@ function handleA2ABridge(req, res) {
     wsReq.end();
 
     function handleWsMessage(msg) {
+      console.log(`[a2a-bridge] WS msg: type=${msg.type} ${msg.event || msg.method || msg.id || ''} ok=${msg.ok} keys=${Object.keys(msg).join(',')}`);
+
       // Step 1: Wait for connect.challenge event
       if (msg.type === 'event' && msg.event === 'connect.challenge') {
         challengeNonce = (msg.payload && msg.payload.nonce) || '';
