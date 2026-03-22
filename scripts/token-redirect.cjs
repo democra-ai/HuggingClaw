@@ -259,7 +259,7 @@ function handleA2ABridge(req, res) {
         'Connection': 'Upgrade',
         'Sec-WebSocket-Key': wsKey,
         'Sec-WebSocket-Version': '13',
-        'Origin': 'http://127.0.0.1:7860',
+        // No Origin header — loopback connections should be recognized as local
       }
     });
 
