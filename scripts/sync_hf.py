@@ -474,17 +474,10 @@ class OpenClawFullSync:
                 "defaultAgent": "claude",
                 "allowedAgents": ["claude"],
                 "maxConcurrentSessions": 4,
-                "dispatch": {
-                    "enabled": True,
-                    "grantScopes": ["operator.read", "operator.write"]
-                },
+                "dispatch": {"enabled": True},
                 "runtime": {"ttlMinutes": 120}
             }
             print("[SYNC] ACP enabled: backend=acpx, agent=claude")
-
-            # ── Grant operator scopes to all authenticated and anonymous requests ──
-            # Required for A2A gateway dispatch to work (needs operator.write)
-            data.setdefault("auth", {})["anonymousScopes"] = ["operator.read", "operator.write"]
 
             # Plugin whitelist — a2a-gateway always enabled (all spaces receive A2A)
             data.setdefault("plugins", {}).setdefault("entries", {})
@@ -543,7 +536,7 @@ class OpenClawFullSync:
                         "skills": [{"id": "chat", "name": "chat", "description": "Chat bridge"}]
                     },
                     "server": {"host": "0.0.0.0", "port": 18800},
-                    "security": {"inboundAuth": "none"},
+                    "security": {"inboundAuth": "token"},
                     "routing": {"defaultAgentId": "main"},
                     "peers": peers
                 }
