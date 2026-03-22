@@ -412,13 +412,8 @@ class OpenClawFullSync:
 
             # Clean up invalid config keys that crash OpenClaw
             if "auth" in data and isinstance(data.get("auth"), dict):
-                data["auth"].pop("defaultScope", None)
                 if not data["auth"]:
                     del data["auth"]
-            if "gateway" in data and isinstance(data.get("gateway"), dict):
-                auth = data["gateway"].get("auth", {})
-                if isinstance(auth, dict):
-                    auth.pop("scope", None)
 
             # Force full gateway config for HF Spaces
             # Dynamic allowedOrigins from SPACE_HOST (auto-set by HF runtime)
@@ -433,7 +428,10 @@ class OpenClawFullSync:
                 "mode": "local",
                 "bind": "lan",
                 "port": 7860,
-                "auth": {"token": GATEWAY_TOKEN},
+                "auth": {
+                    "token": GATEWAY_TOKEN,
+                    "defaultScope": ["operator.read", "operator.write"],
+                },
                 "trustedProxies": ["0.0.0.0/0"],
                 "controlUi": {
                     "allowInsecureAuth": True,

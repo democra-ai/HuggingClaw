@@ -1561,18 +1561,18 @@ def send_a2a_message(space_url, message_text, timeout=90):
     Returns the agent's text response, or "" on error.
     Also tracks health for Adam/Eve for auto-restart.
     """
-    task_id = str(uuid.uuid4())
     req_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
 
     payload = {
         "jsonrpc": "2.0",
-        "method": "tasks/send",
+        "method": "message/send",
         "id": req_id,
         "params": {
-            "id": task_id,
             "message": {
+                "messageId": msg_id,
                 "role": "user",
-                "parts": [{"type": "text", "text": message_text}]
+                "parts": [{"kind": "text", "text": message_text}]
             }
         }
     }
@@ -1590,7 +1590,7 @@ def send_a2a_message(space_url, message_text, timeout=90):
     # Don't waste time on requests that will always fail
     # Check if A2A is available by trying a quick HEAD request first
     try:
-        quick_check = requests.head(f"{space_url}/a2a/", timeout=3)
+        quick_check = requests.head(f"{space_url}/a2a/jsonrpc", timeout=3)
         a2a_available = quick_check.status_code != 404
     except:
         a2a_available = False
@@ -1614,7 +1614,7 @@ def send_a2a_message(space_url, message_text, timeout=90):
 
     try:
         resp = requests.post(
-            f"{space_url}/a2a/",
+            f"{space_url}/a2a/jsonrpc",
             json=payload,
             timeout=timeout,
             headers={"Content-Type": "application/json"}
@@ -1632,43 +1632,44 @@ def send_a2a_message(space_url, message_text, timeout=90):
 
         data = resp.json()
 
-        # Extract text from A2A response
+        # Extract text from A2A response (OpenClaw A2A protocol)
         if "result" in data:
             result = data["result"]
-            # Check artifacts (standard A2A response format)
-            artifacts = result.get("artifacts", [])
-            for artifact in artifacts:
-                parts = artifact.get("parts", [])
-                for part in parts:
-                    if part.get("type") == "text":
-                        text = part["text"].strip()
-                        text = re.sub(r'^(Adam|Eve)\s*[:：]\s*', '', text).strip()
-                        # Validate response: reject separator-only or obviously malformed responses
-                        # Common malformed patterns: "---", "---\n", empty strings, etc.
-                        if not text or text.strip() in ('---', '---', '...', '…'):
-                            print(f"[A2A] Malformed/empty response from {space_url}, treating as failure", file=sys.stderr)
-                            # Don't return early; fall through to fallback mechanism
-                            break
-                        # Track success for health monitoring
-                        if agent_key:
-                            _a2a_health[agent_key]["failures"] = 0
-                            _a2a_health[agent_key]["last_success"] = time.time()
-                        return text
-            # Check status message as fallback
+            text = ""
+
+            # Try new format: result.status.message.parts[]
             status = result.get("status", {})
-            msg = status.get("message", "")
-            if msg:
-                # Validate status message: reject separator-only or obviously malformed responses
-                msg = msg.strip()
-                if not msg or msg in ('---', '---', '...', '…'):
-                    print(f"[A2A] Malformed status message from {space_url}, treating as failure", file=sys.stderr)
-                    # Don't return early; fall through to fallback mechanism
-                else:
-                    # Track success for health monitoring
+            status_msg = status.get("message", {})
+            if isinstance(status_msg, dict):
+                for part in status_msg.get("parts", []):
+                    if part.get("kind") == "text" or part.get("type") == "text":
+                        text = part.get("text", "").strip()
+                        if text:
+                            break
+
+            # Fallback: result.artifacts[].parts[] (old A2A format)
+            if not text:
+                for artifact in result.get("artifacts", []):
+                    for part in artifact.get("parts", []):
+                        if part.get("type") == "text" or part.get("kind") == "text":
+                            text = part.get("text", "").strip()
+                            if text:
+                                break
+                    if text:
+                        break
+
+            # Fallback: result.status.message as plain string
+            if not text and isinstance(status_msg, str):
+                text = status_msg.strip()
+
+            if text:
+                text = re.sub(r'^(Adam|Eve)\s*[:：]\s*', '', text).strip()
+                if text and text not in ('---', '...', '…'):
                     if agent_key:
                         _a2a_health[agent_key]["failures"] = 0
                         _a2a_health[agent_key]["last_success"] = time.time()
-                    return msg
+                    return text
+                print(f"[A2A] Malformed response from {space_url}: {text[:100]}", file=sys.stderr)
 
         if "error" in data:
             err = data["error"]
