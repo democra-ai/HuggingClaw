@@ -428,10 +428,7 @@ class OpenClawFullSync:
                 "mode": "local",
                 "bind": "lan",
                 "port": 7860,
-                "auth": {
-                    "token": GATEWAY_TOKEN,
-                    "defaultScope": ["operator.read", "operator.write"],
-                },
+                "auth": {"token": GATEWAY_TOKEN},
                 "trustedProxies": ["0.0.0.0/0"],
                 "controlUi": {
                     "allowInsecureAuth": True,
@@ -539,7 +536,10 @@ class OpenClawFullSync:
                         "skills": [{"id": "chat", "name": "chat", "description": "Chat bridge"}]
                     },
                     "server": {"host": "0.0.0.0", "port": 18800},
-                    "security": {"inboundAuth": "none"},
+                    "security": {
+                        "inboundAuth": "none",
+                        "scopes": ["operator.read", "operator.write"]
+                    },
                     "routing": {"defaultAgentId": "main"},
                     "peers": peers
                 }
