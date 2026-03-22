@@ -265,19 +265,7 @@ function handleA2ABridge(req, res) {
 
     wsReq.on('upgrade', (upgradeRes, socket, head) => {
       wsSocket = socket;
-      console.log(`[a2a-bridge] WS connected, head=${head.length} bytes, first=[${head.slice(0, 10).join(',')}]`);
-
-      // Process any initial data that came with the upgrade response
-      if (head && head.length > 0) {
-        // Log the head content for debugging
-        const headOpcode = head.length >= 1 ? (head[0] & 0x0f) : -1;
-        const headPayloadLen = head.length >= 2 ? (head[1] & 0x7f) : -1;
-        console.log(`[a2a-bridge] head opcode=${headOpcode} payloadLen=${headPayloadLen}`);
-        if (headOpcode === 1 && headPayloadLen > 0 && head.length >= 2 + headPayloadLen) {
-          console.log(`[a2a-bridge] head text: ${head.slice(2, 2 + Math.min(headPayloadLen, 200)).toString('utf8')}`);
-        }
-        socket.emit('data', head);
-      }
+      console.log(`[a2a-bridge] WS connected, head=${head.length} bytes`);
 
       let frameBuf = Buffer.alloc(0);
 
@@ -328,6 +316,11 @@ function handleA2ABridge(req, res) {
 
       socket.on('close', () => finish(agentText));
       socket.on('error', (err) => finishError(`WS error: ${err.message}`));
+
+      // Process head buffer AFTER data handler is registered
+      if (head && head.length > 0) {
+        socket.emit('data', head);
+      }
     });
 
     wsReq.on('error', (err) => finishError(`WS connect failed: ${err.message}`));
