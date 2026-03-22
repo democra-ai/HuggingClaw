@@ -420,6 +420,8 @@ class OpenClawFullSync:
             allowed_origins = [
                 "https://huggingface.co",
                 "https://*.hf.space",
+                "http://127.0.0.1:7860",
+                "http://localhost:7860",
             ]
             if SPACE_HOST:
                 allowed_origins.append(f"https://{SPACE_HOST}")
