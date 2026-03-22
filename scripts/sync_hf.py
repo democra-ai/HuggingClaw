@@ -536,10 +536,7 @@ class OpenClawFullSync:
                         "skills": [{"id": "chat", "name": "chat", "description": "Chat bridge"}]
                     },
                     "server": {"host": "0.0.0.0", "port": 18800},
-                    "security": {
-                        "inboundAuth": "none",
-                        "scopes": ["operator.read", "operator.write"]
-                    },
+                    "security": {"inboundAuth": "none"},
                     "routing": {"defaultAgentId": "main"},
                     "peers": peers
                 }
@@ -581,7 +578,7 @@ class OpenClawFullSync:
 
             # Fix paired devices scopes (OpenClaw 2026.2.19+ requires operator.write/read)
             # Delete old paired devices to force fresh auto-pair with correct scopes
-            devices_dir = Path(OPENCLAW_DIR) / "devices"
+            devices_dir = Path(OPENCLAW_HOME) / "devices"
             if devices_dir.exists():
                 import shutil
                 shutil.rmtree(devices_dir, ignore_errors=True)

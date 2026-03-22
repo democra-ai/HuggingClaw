@@ -1617,7 +1617,10 @@ def send_a2a_message(space_url, message_text, timeout=90):
             f"{space_url}/a2a/jsonrpc",
             json=payload,
             timeout=timeout,
-            headers={"Content-Type": "application/json"}
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {os.environ.get('GATEWAY_TOKEN', 'huggingclaw')}",
+            }
         )
 
         # Check response status first
