@@ -210,124 +210,189 @@ function handleA2ABridge(req, res) {
       return;
     }
 
-    // Connect to OpenClaw via WebSocket
-    const WebSocket = (() => {
-      try { return require('ws'); } catch (e) { return null; }
-    })();
-
-    if (!WebSocket) {
-      // Fallback: try native fetch to OpenClaw HTTP API
-      console.log('[a2a-bridge] ws module not available, trying HTTP fallback');
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        jsonrpc: '2.0', id: rpc.id,
-        error: { code: -32603, message: 'WebSocket module not available' }
-      }));
-      return;
-    }
-
-    const wsUrl = `ws://127.0.0.1:7860/?token=${GATEWAY_TOKEN}`;
-    const ws = new WebSocket(wsUrl);
+    // Connect to OpenClaw via raw WebSocket (no ws module needed)
+    const crypto = require('crypto');
+    const wsKey = crypto.randomBytes(16).toString('base64');
     let responded = false;
     let agentText = '';
-    const timeout = setTimeout(() => {
+
+    const wsTimeout = setTimeout(() => {
       if (!responded) {
         responded = true;
-        ws.close();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          jsonrpc: '2.0', id: rpc.id,
-          error: { code: -32000, message: 'Agent response timeout' }
-        }));
+        try { wsSocket.destroy(); } catch (_) {}
+        sendA2AResponse(res, rpc.id, messageId, agentText || '(timeout)');
       }
-    }, 120000); // 2 minute timeout
+    }, 120000);
 
-    ws.on('open', () => {
-      // Send message via OpenClaw's RPC protocol
-      ws.send(JSON.stringify({
+    const wsReq = http.request({
+      hostname: '127.0.0.1', port: 7860,
+      path: `/?token=${GATEWAY_TOKEN}`,
+      method: 'GET',
+      headers: {
+        'Upgrade': 'websocket',
+        'Connection': 'Upgrade',
+        'Sec-WebSocket-Key': wsKey,
+        'Sec-WebSocket-Version': '13',
+      }
+    });
+
+    let wsSocket;
+
+    wsReq.on('upgrade', (upgradeRes, socket, head) => {
+      wsSocket = socket;
+      console.log('[a2a-bridge] WebSocket connected to OpenClaw');
+
+      // Send message via OpenClaw RPC
+      wsSend(socket, JSON.stringify({
         type: 'rpc',
         method: 'sessions.send',
-        params: {
-          agentId: 'main',
-          text: messageText,
-        },
+        params: { agentId: 'main', text: messageText },
         id: 'a2a-' + Date.now()
       }));
-    });
 
-    ws.on('message', (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
+      // Buffer for partial frames
+      let frameBuf = Buffer.alloc(0);
 
-        // Collect agent text responses
-        if (msg.type === 'event' && msg.event === 'agent.message') {
-          const text = (msg.data && msg.data.text) || '';
-          if (text) agentText += text;
-        }
+      socket.on('data', (chunk) => {
+        frameBuf = Buffer.concat([frameBuf, chunk]);
 
-        // Agent finished responding
-        if (msg.type === 'event' && (msg.event === 'agent.done' || msg.event === 'session.done' || msg.event === 'turn.done')) {
-          if (!responded) {
-            responded = true;
-            clearTimeout(timeout);
-            ws.close();
-            sendA2AResponse(res, rpc.id, messageId, agentText || '(no response)');
+        // Parse WebSocket frames (simplified — handles text frames)
+        while (frameBuf.length >= 2) {
+          const firstByte = frameBuf[0];
+          const opcode = firstByte & 0x0f;
+          const secondByte = frameBuf[1];
+          const masked = (secondByte & 0x80) !== 0;
+          let payloadLen = secondByte & 0x7f;
+          let offset = 2;
+
+          if (payloadLen === 126) {
+            if (frameBuf.length < 4) return;
+            payloadLen = frameBuf.readUInt16BE(2);
+            offset = 4;
+          } else if (payloadLen === 127) {
+            if (frameBuf.length < 10) return;
+            payloadLen = Number(frameBuf.readBigUInt64BE(2));
+            offset = 10;
+          }
+
+          if (masked) offset += 4;
+          if (frameBuf.length < offset + payloadLen) return;
+
+          let payload = frameBuf.slice(offset, offset + payloadLen);
+          if (masked) {
+            const mask = frameBuf.slice(offset - 4, offset);
+            for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+          }
+          frameBuf = frameBuf.slice(offset + payloadLen);
+
+          if (opcode === 0x01) { // Text frame
+            try {
+              const msg = JSON.parse(payload.toString('utf8'));
+              handleWsMessage(msg);
+            } catch (_) {}
+          } else if (opcode === 0x08) { // Close frame
+            socket.end();
+          } else if (opcode === 0x09) { // Ping
+            wsSend(socket, '', 0x0a); // Pong
           }
         }
+      });
 
-        // RPC response (might contain the reply directly)
-        if (msg.type === 'rpc_response' || msg.type === 'rpc-response') {
-          if (msg.result && typeof msg.result === 'object') {
-            const text = msg.result.text || msg.result.message || '';
-            if (text && !responded) {
-              responded = true;
-              clearTimeout(timeout);
-              ws.close();
-              sendA2AResponse(res, rpc.id, messageId, text);
-            }
-          }
+      socket.on('close', () => {
+        if (!responded) {
+          responded = true;
+          clearTimeout(wsTimeout);
+          sendA2AResponse(res, rpc.id, messageId, agentText || '(connection closed)');
         }
+      });
 
-        // Error response
-        if (msg.type === 'error' || (msg.error && !responded)) {
-          const errMsg = (msg.error && msg.error.message) || msg.message || 'Unknown error';
-          console.log(`[a2a-bridge] WS error: ${errMsg}`);
-          // Don't immediately fail — wait for agent text that may have already arrived
-        }
-      } catch (e) {
-        // Non-JSON message, ignore
-      }
-    });
-
-    ws.on('close', () => {
-      if (!responded) {
-        responded = true;
-        clearTimeout(timeout);
-        if (agentText) {
-          sendA2AResponse(res, rpc.id, messageId, agentText);
-        } else {
+      socket.on('error', (err) => {
+        console.log(`[a2a-bridge] Socket error: ${err.message}`);
+        if (!responded) {
+          responded = true;
+          clearTimeout(wsTimeout);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
             jsonrpc: '2.0', id: rpc.id,
-            error: { code: -32000, message: 'WebSocket closed without response' }
+            error: { code: -32000, message: `WS error: ${err.message}` }
           }));
         }
-      }
+      });
     });
 
-    ws.on('error', (err) => {
-      console.log(`[a2a-bridge] WS error: ${err.message}`);
+    wsReq.on('error', (err) => {
+      console.log(`[a2a-bridge] WS connect error: ${err.message}`);
       if (!responded) {
         responded = true;
-        clearTimeout(timeout);
+        clearTimeout(wsTimeout);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           jsonrpc: '2.0', id: rpc.id,
-          error: { code: -32000, message: `WebSocket error: ${err.message}` }
+          error: { code: -32000, message: `WS connect failed: ${err.message}` }
         }));
       }
     });
+
+    wsReq.end();
+
+    function handleWsMessage(msg) {
+      if (msg.type === 'event' && msg.event === 'agent.message') {
+        const t = (msg.data && msg.data.text) || '';
+        if (t) agentText += t;
+      }
+      if (msg.type === 'event' && /^(agent|session|turn)\.(done|end|complete)$/.test(msg.event || '')) {
+        if (!responded) {
+          responded = true;
+          clearTimeout(wsTimeout);
+          try { wsSocket.destroy(); } catch (_) {}
+          sendA2AResponse(res, rpc.id, messageId, agentText || '(no response)');
+        }
+      }
+      if ((msg.type === 'rpc_response' || msg.type === 'rpc-response') && msg.result) {
+        const t = msg.result.text || msg.result.message || '';
+        if (t && !responded) {
+          responded = true;
+          clearTimeout(wsTimeout);
+          try { wsSocket.destroy(); } catch (_) {}
+          sendA2AResponse(res, rpc.id, messageId, t);
+        }
+      }
+      if (msg.type === 'error' && msg.error) {
+        console.log(`[a2a-bridge] RPC error: ${JSON.stringify(msg.error).slice(0, 200)}`);
+      }
+    }
   });
+}
+
+function wsSend(socket, data, opcode = 0x01) {
+  // Send a WebSocket frame (unmasked, server-to-client style)
+  const payload = Buffer.from(data, 'utf8');
+  let header;
+  if (payload.length < 126) {
+    header = Buffer.alloc(2);
+    header[0] = 0x80 | opcode; // FIN + opcode
+    header[1] = payload.length;
+  } else if (payload.length < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(payload.length), 2);
+  }
+  // Client frames must be masked
+  const mask = require('crypto').randomBytes(4);
+  const masked = Buffer.alloc(payload.length);
+  for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i % 4];
+  const maskHeader = Buffer.alloc(header.length);
+  header.copy(maskHeader);
+  maskHeader[1] |= 0x80; // Set mask bit
+  try {
+    socket.write(Buffer.concat([maskHeader, mask, masked]));
+  } catch (_) {}
 }
 
 function sendA2AResponse(res, rpcId, messageId, text) {
