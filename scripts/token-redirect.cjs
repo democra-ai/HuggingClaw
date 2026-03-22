@@ -338,7 +338,7 @@ function handleA2ABridge(req, res) {
           type: 'req', id: 'connect-' + Date.now(), method: 'connect',
           params: {
             auth: { token: GATEWAY_TOKEN },
-            client: { id: 'cli', platform: 'node', mode: 'cli', version: '1.0.0' },
+            client: { id: 'gateway-client', platform: 'node', mode: 'backend', version: '1.0.0' },
             minProtocol: 3,
             maxProtocol: 3,
           }
