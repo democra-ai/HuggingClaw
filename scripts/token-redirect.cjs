@@ -266,7 +266,12 @@ function handleA2ABridge(req, res) {
 
       socket.on('data', (chunk) => {
         frameBuf = Buffer.concat([frameBuf, chunk]);
+        // Debug: log raw data size
+        if (frameBuf.length > 0 && frameBuf.length < 500) {
+          console.log(`[a2a-bridge] Raw data: len=${frameBuf.length} first_bytes=[${frameBuf[0]},${frameBuf[1]}] opcode=${frameBuf[0] & 0x0f}`);
+        }
         while (frameBuf.length >= 2) {
+          const fin = (frameBuf[0] & 0x80) !== 0;
           const opcode = frameBuf[0] & 0x0f;
           const masked = (frameBuf[1] & 0x80) !== 0;
           let payloadLen = frameBuf[1] & 0x7f;
@@ -288,9 +293,11 @@ function handleA2ABridge(req, res) {
           }
           frameBuf = frameBuf.slice(offset + payloadLen);
 
+          console.log(`[a2a-bridge] Frame: opcode=${opcode} fin=${fin} len=${payloadLen} preview=${payload.toString('utf8').slice(0, 200)}`);
+
           if (opcode === 0x01) {
             try { handleWsMessage(JSON.parse(payload.toString('utf8'))); }
-            catch (_) {}
+            catch (e) { console.log(`[a2a-bridge] JSON parse error: ${e.message}`); }
           } else if (opcode === 0x08) { socket.end(); }
           else if (opcode === 0x09) { wsSend(socket, '', 0x0a); }
         }
