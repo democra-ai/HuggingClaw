@@ -349,7 +349,8 @@ function handleA2ABridge(req, res) {
       // Step 3: On connect response, send agent request
       if (msg.type === 'res' && msg.id && msg.id.startsWith('connect-')) {
         if (msg.ok) {
-          console.log('[a2a-bridge] Connected, sending agent request...');
+          console.log(`[a2a-bridge] Connected OK, scopes=${JSON.stringify(msg.payload)}`);
+          console.log('[a2a-bridge] Sending agent request...');
           wsSend(wsSocket, JSON.stringify({
             type: 'req', id: 'agent-' + Date.now(), method: 'agent',
             params: {
@@ -361,7 +362,7 @@ function handleA2ABridge(req, res) {
             }
           }));
         } else {
-          const errMsg = (msg.payload && msg.payload.message) || 'connect failed';
+          const errMsg = (msg.error && msg.error.message) || JSON.stringify(msg.error || msg.payload || {}).slice(0, 300);
           console.log(`[a2a-bridge] Connect failed: ${errMsg}`);
           finishError(`Gateway connect failed: ${errMsg}`);
         }
@@ -383,7 +384,7 @@ function handleA2ABridge(req, res) {
           if (summary) agentText = summary;
           finish(agentText || '(agent completed, no text in payload)');
         } else {
-          const errMsg = (msg.payload && msg.payload.message) || JSON.stringify(msg.payload || {}).slice(0, 200);
+          const errMsg = (msg.error && msg.error.message) || (msg.payload && msg.payload.message) || JSON.stringify(msg.error || msg.payload || {}).slice(0, 300);
           console.log(`[a2a-bridge] Agent RPC failed: ${errMsg}`);
           finishError(`Agent dispatch failed: ${errMsg}`);
         }
