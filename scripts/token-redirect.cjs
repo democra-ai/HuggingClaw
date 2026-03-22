@@ -338,7 +338,7 @@ function handleA2ABridge(req, res) {
           type: 'req', id: 'connect-' + Date.now(), method: 'connect',
           params: {
             auth: { token: GATEWAY_TOKEN, nonce: challengeNonce },
-            client: { id: 'a2a-bridge', name: 'A2A Bridge', version: '1.0.0', platform: 'node', mode: 'operator' },
+            client: { id: 'webchat', platform: 'web', mode: 'operator' },
             minProtocol: 3,
             maxProtocol: 3,
           }
