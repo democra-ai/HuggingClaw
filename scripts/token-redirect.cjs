@@ -341,6 +341,8 @@ function handleA2ABridge(req, res) {
             clientId: 'a2a-bridge',
             clientInfo: { name: 'A2A Bridge', version: '1.0.0' },
             nonce: challengeNonce,
+            minProtocol: 3,
+            maxProtocol: 3,
           }
         }));
         return;
