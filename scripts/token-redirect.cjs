@@ -337,10 +337,8 @@ function handleA2ABridge(req, res) {
         wsSend(wsSocket, JSON.stringify({
           type: 'req', id: 'connect-' + Date.now(), method: 'connect',
           params: {
-            auth: { token: GATEWAY_TOKEN },
-            clientId: 'a2a-bridge',
-            clientInfo: { name: 'A2A Bridge', version: '1.0.0' },
-            nonce: challengeNonce,
+            auth: { token: GATEWAY_TOKEN, nonce: challengeNonce },
+            client: { id: 'a2a-bridge', name: 'A2A Bridge', version: '1.0.0' },
             minProtocol: 3,
             maxProtocol: 3,
           }
