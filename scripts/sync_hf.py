@@ -576,52 +576,11 @@ class OpenClawFullSync:
                         target.write_text(text)
                         print(f"[SYNC] Deployed workspace template: {tmpl.name}")
 
-            # ── Pre-create device identity with operator.write scope ──────
-            # OpenClaw's auto-pairing only grants operator.read, but A2A
-            # gateway dispatch requires operator.write (known issue #22226).
-            # Fix: pre-create device-auth.json and paired.json with full scopes.
-            import uuid as _uuid
-            device_id = "huggingclaw-a2a"
-            device_token = GATEWAY_TOKEN
-            full_scopes = ["operator.read", "operator.write", "operator.admin",
-                           "operator.approvals", "operator.pairing"]
-
-            identity_dir = Path(OPENCLAW_HOME) / "identity"
-            identity_dir.mkdir(parents=True, exist_ok=True)
-            device_auth = identity_dir / "device-auth.json"
-            device_auth.write_text(json.dumps({
-                "clientId": device_id,
-                "clientMode": "operator",
-                "role": "operator",
-                "scopes": full_scopes,
-                "tokens": [{
-                    "role": "operator",
-                    "scopes": full_scopes,
-                    "token": device_token
-                }]
-            }, indent=2))
-
+            # Clean stale devices from backup
             devices_dir = Path(OPENCLAW_HOME) / "devices"
             if devices_dir.exists():
                 shutil.rmtree(devices_dir, ignore_errors=True)
-            devices_dir.mkdir(parents=True, exist_ok=True)
-            paired_file = devices_dir / "paired.json"
-            paired_file.write_text(json.dumps([{
-                "id": device_id,
-                "name": f"{AGENT_NAME} A2A Bridge",
-                "role": "operator",
-                "scopes": full_scopes,
-                "tokens": {
-                    "operator": {
-                        "scopes": full_scopes,
-                        "token": device_token
-                    }
-                },
-                "createdAt": datetime.now().isoformat(),
-                "approved": True,
-                "paired": True
-            }], indent=2))
-            print(f"[SYNC] Pre-created device identity with operator.write scope")
+                print("[SYNC] Deleted devices/ dir to force fresh auto-pair")
 
             # Verify write
             with open(config_path, "r") as f:
@@ -678,6 +637,30 @@ class OpenClawFullSync:
                 print(f"[SYNC]   Contents: {list(Path(APP_DIR).iterdir())[:20]}")
             except: pass
             return None
+
+        # ── Patch OpenClaw scope bug (openclaw/openclaw#17187) ────────
+        # When dangerouslyDisableDeviceAuth=true, OpenClaw clears ALL scopes
+        # (including operator.write needed for A2A dispatch).
+        # Fix: patch the JS files to grant full scopes instead of clearing.
+        dist_dir = Path(APP_DIR) / "dist"
+        if dist_dir.exists():
+            import glob as _glob
+            patched = 0
+            for js_file in dist_dir.glob("gateway-cli-*.js"):
+                try:
+                    content = js_file.read_text()
+                    # Find the scope-clearing pattern and replace with full scopes
+                    old_pattern = "scopes=[]"
+                    new_pattern = 'scopes=["operator.read","operator.write","operator.admin","operator.approvals","operator.pairing"]'
+                    if old_pattern in content:
+                        content = content.replace(old_pattern, new_pattern)
+                        js_file.write_text(content)
+                        patched += 1
+                        print(f"[SYNC] Patched {js_file.name}: scope-clearing → full operator scopes")
+                except Exception as e:
+                    print(f"[SYNC] Failed to patch {js_file.name}: {e}")
+            if patched == 0:
+                print("[SYNC] No gateway-cli files needed patching (pattern not found or already patched)")
 
         # Use subprocess.run with direct output, no shell pipe
         print(f"[SYNC] Launching: {' '.join(entry_cmd)}")
