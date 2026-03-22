@@ -484,11 +484,9 @@ class OpenClawFullSync:
             }
             print("[SYNC] ACP enabled: backend=acpx, agent=claude")
 
-            # Plugin whitelist
+            # Plugin whitelist — a2a-gateway always enabled (all spaces receive A2A)
             data.setdefault("plugins", {}).setdefault("entries", {})
-            plugin_allow = ["telegram", "whatsapp", "coding-agent", "acpx"]
-            if A2A_PEERS:
-                plugin_allow.append("a2a-gateway")
+            plugin_allow = ["telegram", "whatsapp", "coding-agent", "acpx", "a2a-gateway"]
             data["plugins"]["allow"] = plugin_allow
 
             # ── acpx Plugin Configuration (ACP backend) ──
@@ -518,9 +516,11 @@ class OpenClawFullSync:
             elif isinstance(data["plugins"]["entries"]["telegram"], dict):
                 data["plugins"]["entries"]["telegram"]["enabled"] = True
 
-            # ── A2A Gateway Plugin Configuration (only if A2A_PEERS is set) ──
+            # ── A2A Gateway Plugin Configuration (always enabled) ──
+            # All spaces must accept inbound A2A messages from conversation-loop.
+            # Peers are optional (for outbound connections to other agents).
+            peers = []
             if A2A_PEERS:
-                peers = []
                 for peer_url in A2A_PEERS.split(","):
                     peer_url = peer_url.strip()
                     if not peer_url:
@@ -532,21 +532,21 @@ class OpenClawFullSync:
                     })
                     print(f"[SYNC] A2A peer: {name} → {peer_url}")
 
-                data["plugins"]["entries"]["a2a-gateway"] = {
-                    "enabled": True,
-                    "config": {
-                        "agentCard": {
-                            "name": AGENT_NAME,
-                            "description": f"{AGENT_NAME} - HuggingClaw A2A Agent",
-                            "skills": [{"id": "chat", "name": "chat", "description": "Chat bridge"}]
-                        },
-                        "server": {"host": "0.0.0.0", "port": 18800},
-                        "security": {"inboundAuth": "none"},
-                        "routing": {"defaultAgentId": "main"},
-                        "peers": peers
-                    }
+            data["plugins"]["entries"]["a2a-gateway"] = {
+                "enabled": True,
+                "config": {
+                    "agentCard": {
+                        "name": AGENT_NAME,
+                        "description": f"{AGENT_NAME} - HuggingClaw A2A Agent",
+                        "skills": [{"id": "chat", "name": "chat", "description": "Chat bridge"}]
+                    },
+                    "server": {"host": "0.0.0.0", "port": 18800},
+                    "security": {"inboundAuth": "none"},
+                    "routing": {"defaultAgentId": "main"},
+                    "peers": peers
                 }
-                print(f"[SYNC] A2A gateway configured: name={AGENT_NAME}, port=18800, peers={len(peers)}")
+            }
+            print(f"[SYNC] A2A gateway configured: name={AGENT_NAME}, port=18800, peers={len(peers)}")
 
             # ── Telegram channel defaults (open DM policy for HF Spaces) ──
             # Personal bot on HF Spaces — no need for strict pairing.
