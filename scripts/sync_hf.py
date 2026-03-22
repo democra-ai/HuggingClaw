@@ -428,7 +428,7 @@ class OpenClawFullSync:
                 "mode": "local",
                 "bind": "lan",
                 "port": 7860,
-                "auth": {"mode": "none"},
+                "auth": {"token": GATEWAY_TOKEN},
                 "trustedProxies": ["0.0.0.0/0"],
                 "controlUi": {
                     "allowInsecureAuth": True,
@@ -644,42 +644,32 @@ class OpenClawFullSync:
         # Fix: patch the JS files to grant full scopes instead of clearing.
         # ── Patch OpenClaw scope bug (openclaw/openclaw#17187) ────────
         # When dangerouslyDisableDeviceAuth=true, OpenClaw clears ALL scopes.
-        # Patch all JS files in dist/ that contain the scope-clearing pattern.
+        # Only patch gateway-cli-*.js files with precise context matching.
         dist_dir = Path(APP_DIR) / "dist"
         full_scopes = '["operator.read","operator.write","operator.admin","operator.approvals","operator.pairing"]'
         if dist_dir.exists():
-            import re as _re
             patched = 0
-            for js_file in dist_dir.rglob("*.js"):
+            for js_file in dist_dir.glob("gateway-cli-*.js"):
                 try:
                     content = js_file.read_text(errors="ignore")
-                    # Pattern variants in minified JS:
-                    #   scopes=[]  or  scopes = []  or  scopes=[];
-                    # Only match when near "device" context to avoid false positives
-                    new_content = content
-                    for pattern in [
-                        "scopes=[]",
-                        "scopes = []",
-                    ]:
-                        if pattern in new_content:
-                            new_content = new_content.replace(pattern, f"scopes={full_scopes}")
+                    # Only replace scopes=[] when preceded by !device (the exact bug pattern)
+                    # Pattern in minified: if(!device){if(scopes.length>0){scopes=[];...}}
+                    import re as _re
+                    new_content = _re.sub(
+                        r'(if\s*\(\s*!device\s*\)\s*\{[^}]*?)scopes\s*=\s*\[\]',
+                        rf'\1scopes={full_scopes}',
+                        content
+                    )
                     if new_content != content:
                         js_file.write_text(new_content)
                         patched += 1
-                        print(f"[SYNC] Patched {js_file.name}: scope-clearing → full operator scopes")
-                except Exception:
-                    pass
-            if patched == 0:
-                # Try chunked search for the pattern across all JS files
-                print("[SYNC] Standard patterns not found, searching for scope-clearing in chunks...")
-                for js_file in dist_dir.rglob("*.js"):
-                    try:
-                        content = js_file.read_text(errors="ignore")
-                        # Look for the actual pattern: if(!device){...scopes...}
-                        if "!device" in content and "scopes" in content:
-                            print(f"[SYNC] Found device/scopes reference in {js_file.name} ({len(content)} bytes)")
-                    except:
-                        pass
+                        print(f"[SYNC] Patched {js_file.name}: !device scope-clearing → full operator scopes")
+                except Exception as e:
+                    print(f"[SYNC] Failed to patch {js_file.name}: {e}")
+            if patched:
+                print(f"[SYNC] Patched {patched} gateway-cli file(s)")
+            else:
+                print("[SYNC] No gateway-cli files matched the !device scope pattern")
 
         # Use subprocess.run with direct output, no shell pipe
         print(f"[SYNC] Launching: {' '.join(entry_cmd)}")
