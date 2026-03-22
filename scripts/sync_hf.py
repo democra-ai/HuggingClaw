@@ -576,22 +576,11 @@ class OpenClawFullSync:
                         target.write_text(text)
                         print(f"[SYNC] Deployed workspace template: {tmpl.name}")
 
-            # Pre-create a paired device with operator.write/read scopes.
-            # This is needed for A2A gateway dispatch to have sufficient permissions.
+            # Clean stale devices from backup to force fresh auto-pair
             devices_dir = Path(OPENCLAW_HOME) / "devices"
             if devices_dir.exists():
                 shutil.rmtree(devices_dir, ignore_errors=True)
-            devices_dir.mkdir(parents=True, exist_ok=True)
-            device_file = devices_dir / "a2a-bridge.json"
-            device_file.write_text(json.dumps({
-                "id": "a2a-bridge",
-                "name": "A2A Bridge",
-                "token": GATEWAY_TOKEN,
-                "scopes": ["operator.read", "operator.write"],
-                "createdAt": datetime.now().isoformat(),
-                "approved": True
-            }, indent=2))
-            print("[SYNC] Created A2A bridge device with operator scopes")
+                print("[SYNC] Deleted devices/ dir to force fresh auto-pair")
 
             # Verify write
             with open(config_path, "r") as f:

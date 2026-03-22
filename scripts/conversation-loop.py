@@ -1638,41 +1638,56 @@ def send_a2a_message(space_url, message_text, timeout=90):
         # Extract text from A2A response (OpenClaw A2A protocol)
         if "result" in data:
             result = data["result"]
-            text = ""
-
-            # Try new format: result.status.message.parts[]
             status = result.get("status", {})
-            status_msg = status.get("message", {})
-            if isinstance(status_msg, dict):
-                for part in status_msg.get("parts", []):
-                    if part.get("kind") == "text" or part.get("type") == "text":
-                        text = part.get("text", "").strip()
-                        if text:
-                            break
+            state = status.get("state", "")
 
-            # Fallback: result.artifacts[].parts[] (old A2A format)
-            if not text:
-                for artifact in result.get("artifacts", []):
-                    for part in artifact.get("parts", []):
-                        if part.get("type") == "text" or part.get("kind") == "text":
+            # Check for failed dispatch (e.g. missing scope) — treat as A2A failure
+            if state == "failed":
+                status_msg = status.get("message", {})
+                err_text = ""
+                if isinstance(status_msg, dict):
+                    for part in status_msg.get("parts", []):
+                        err_text = part.get("text", "")
+                        if err_text:
+                            break
+                elif isinstance(status_msg, str):
+                    err_text = status_msg
+                print(f"[A2A] Dispatch failed from {space_url}: {err_text[:200]}", file=sys.stderr)
+                # Fall through to LLM fallback below
+            else:
+                text = ""
+                # Try new format: result.status.message.parts[]
+                status_msg = status.get("message", {})
+                if isinstance(status_msg, dict):
+                    for part in status_msg.get("parts", []):
+                        if part.get("kind") == "text" or part.get("type") == "text":
                             text = part.get("text", "").strip()
                             if text:
                                 break
-                    if text:
-                        break
 
-            # Fallback: result.status.message as plain string
-            if not text and isinstance(status_msg, str):
-                text = status_msg.strip()
+                # Fallback: result.artifacts[].parts[] (old A2A format)
+                if not text:
+                    for artifact in result.get("artifacts", []):
+                        for part in artifact.get("parts", []):
+                            if part.get("type") == "text" or part.get("kind") == "text":
+                                text = part.get("text", "").strip()
+                                if text:
+                                    break
+                        if text:
+                            break
 
-            if text:
-                text = re.sub(r'^(Adam|Eve)\s*[:：]\s*', '', text).strip()
-                if text and text not in ('---', '...', '…'):
-                    if agent_key:
-                        _a2a_health[agent_key]["failures"] = 0
-                        _a2a_health[agent_key]["last_success"] = time.time()
-                    return text
-                print(f"[A2A] Malformed response from {space_url}: {text[:100]}", file=sys.stderr)
+                # Fallback: result.status.message as plain string
+                if not text and isinstance(status_msg, str):
+                    text = status_msg.strip()
+
+                if text:
+                    text = re.sub(r'^(Adam|Eve)\s*[:：]\s*', '', text).strip()
+                    if text and text not in ('---', '...', '…'):
+                        if agent_key:
+                            _a2a_health[agent_key]["failures"] = 0
+                            _a2a_health[agent_key]["last_success"] = time.time()
+                        return text
+                    print(f"[A2A] Malformed response from {space_url}: {text[:100]}", file=sys.stderr)
 
         if "error" in data:
             err = data["error"]
