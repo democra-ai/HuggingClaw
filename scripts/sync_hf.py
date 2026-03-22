@@ -536,7 +536,7 @@ class OpenClawFullSync:
                         "skills": [{"id": "chat", "name": "chat", "description": "Chat bridge"}]
                     },
                     "server": {"host": "0.0.0.0", "port": 18800},
-                    "security": {"inboundAuth": "token"},
+                    "security": {"inboundAuth": "bearer"},
                     "routing": {"defaultAgentId": "main"},
                     "peers": peers
                 }
