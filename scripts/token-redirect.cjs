@@ -298,7 +298,13 @@ function handleA2ABridge(req, res) {
           }
           frameBuf = frameBuf.slice(offset + payloadLen);
 
-          console.log(`[a2a-bridge] Frame: opcode=${opcode} fin=${fin} len=${payloadLen} preview=${payload.toString('utf8').slice(0, 200)}`);
+          if (opcode === 0x08 && payloadLen >= 2) {
+            const closeCode = payload.readUInt16BE(0);
+            const closeReason = payloadLen > 2 ? payload.slice(2).toString('utf8') : '';
+            console.log(`[a2a-bridge] WS Close: code=${closeCode} reason=${closeReason}`);
+          } else {
+            console.log(`[a2a-bridge] Frame: opcode=${opcode} fin=${fin} len=${payloadLen} preview=${payload.toString('utf8').slice(0, 200)}`);
+          }
 
           if (opcode === 0x01) {
             try { handleWsMessage(JSON.parse(payload.toString('utf8'))); }
