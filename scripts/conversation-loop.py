@@ -1586,32 +1586,9 @@ def send_a2a_message(space_url, message_text, timeout=90):
     elif space_url == GOD_SPACE:
         agent_key = "god"
 
-    # CRITICAL FIX: If A2A endpoint doesn't exist, immediately use fallback
-    # Don't waste time on requests that will always fail
-    # Check if A2A is available by trying a quick HEAD request first
-    try:
-        quick_check = requests.head(f"{space_url}/a2a/jsonrpc", timeout=3)
-        a2a_available = quick_check.status_code != 404
-    except:
-        a2a_available = False
-
-    if not a2a_available:
-        print(f"[A2A] Endpoint not available for {agent_key or space_url}, using fallback immediately")
-        # Increment failure counter for health tracking
-        if agent_key:
-            _a2a_health[agent_key]["failures"] += 1
-        # Use fallback directly
-        fallback_response = call_llm_fallback(agent_key, message_text)
-        if fallback_response:
-            return fallback_response
-        # If fallback also fails, use ultimate fallback
-        if agent_key == "adam":
-            return "Eve, let me check Cain's current state and determine our next action. [TASK] Check Cain's health and logs to identify any issues or blockers."
-        elif agent_key == "god":
-            return "[OK] Communication issues detected, skipping this cycle."
-        else:
-            return "Adam, I agree. Let's review what Claude Code has done and decide on the next steps for improving Cain."
-
+    # Go straight to POST — the A2A bridge handles /a2a/jsonrpc via WebSocket.
+    # HEAD checks are unreliable (bridge only handles POST, HEAD hits a2a-gateway
+    # plugin which returns 404).
     try:
         resp = requests.post(
             f"{space_url}/a2a/jsonrpc",
