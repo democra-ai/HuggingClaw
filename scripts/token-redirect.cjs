@@ -370,36 +370,56 @@ function handleA2ABridge(req, res) {
         return;
       }
 
-      // Step 4: Collect agent response
+      // Step 4: Agent RPC response — "accepted" means async processing started
       if (msg.type === 'res' && msg.id && msg.id.startsWith('agent-')) {
-        console.log(`[a2a-bridge] Agent RPC response: ok=${msg.ok} payload=${JSON.stringify(msg.payload || {}).slice(0, 500)}`);
         if (msg.ok) {
-          // Extract text from agent response payload — try all known fields
           const p = msg.payload || {};
-          const summary = p.summary || p.text || p.message || p.content || '';
-          // Also check nested structures
-          if (!summary && p.messages && Array.isArray(p.messages)) {
-            const lastMsg = p.messages[p.messages.length - 1];
-            if (lastMsg && lastMsg.content) agentText = typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content);
-          }
-          if (summary) agentText = summary;
-          finish(agentText || '(agent completed, no text in payload)');
+          console.log(`[a2a-bridge] Agent accepted: status=${p.status} runId=${p.runId}`);
+          // If status is "accepted", wait for agent/chat events with the actual response
+          if (p.status === 'accepted') return; // Don't finish yet — wait for events
+          // If payload has direct text (unlikely), use it
+          const summary = p.summary || p.text || p.message || '';
+          if (summary) { finish(summary); return; }
         } else {
-          const errMsg = (msg.error && msg.error.message) || (msg.payload && msg.payload.message) || JSON.stringify(msg.error || msg.payload || {}).slice(0, 300);
+          const errMsg = (msg.error && msg.error.message) || JSON.stringify(msg.error || msg.payload || {}).slice(0, 300);
           console.log(`[a2a-bridge] Agent RPC failed: ${errMsg}`);
           finishError(`Agent dispatch failed: ${errMsg}`);
         }
         return;
       }
 
-      // Collect streaming events
+      // Step 5: Collect streaming agent response events
       if (msg.type === 'event') {
         const p = msg.payload || {};
-        console.log(`[a2a-bridge] Event: ${msg.event} payload_keys=${Object.keys(p).join(',')}`);
-        if (p.text) agentText += p.text;
-        if (p.message) agentText += p.message;
-        // sessions.messages events contain full message objects
-        if (p.content && typeof p.content === 'string') agentText += p.content;
+        const ev = msg.event || '';
+
+        // chat event — contains agent message chunks
+        if (ev === 'chat' && p.message) {
+          const m = typeof p.message === 'string' ? p.message : '';
+          if (m) { agentText += m; console.log(`[a2a-bridge] chat chunk: ${m.slice(0,100)}`); }
+        }
+
+        // agent event — contains full response or status updates
+        if (ev === 'agent') {
+          if (p.text) agentText += p.text;
+          if (p.message && typeof p.message === 'string') agentText += p.message;
+          // Check for completion
+          if (p.status === 'done' || p.status === 'completed' || p.done) {
+            const summary = p.summary || p.text || '';
+            if (summary && !agentText) agentText = summary;
+            console.log(`[a2a-bridge] Agent done, text len=${agentText.length}`);
+            finish(agentText || '(agent done, no text)');
+            return;
+          }
+        }
+
+        // session.message event — individual messages
+        if (ev === 'session.message' && p.role === 'assistant') {
+          const content = p.content || p.text || '';
+          if (content) agentText += content;
+        }
+
+        // Generic text/delta in any event
         if (p.delta && typeof p.delta === 'string') agentText += p.delta;
       }
     }
