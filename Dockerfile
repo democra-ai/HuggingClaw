@@ -56,7 +56,8 @@ RUN mkdir -p /app/openclaw/empty-bundled-plugins \
   && echo "[build] OpenClaw version: $(cat /app/openclaw/.version)"
 
 # ── Scripts + Config + Frontend ──────────────────────────────────────────────
-# Cache-bust: 2026-03-24-v3 (A2A bridge final response fix)
+ARG CACHE_BUST=2026-03-24-v4
+RUN echo "Build: ${CACHE_BUST}"
 COPY --chown=node:node scripts /home/node/scripts
 COPY --chown=node:node frontend /home/node/frontend
 COPY --chown=node:node workspace-templates /home/node/workspace-templates
