@@ -259,7 +259,7 @@ function handleA2ABridge(req, res) {
         'Connection': 'Upgrade',
         'Sec-WebSocket-Key': wsKey,
         'Sec-WebSocket-Version': '13',
-        // No Origin header — loopback connections should be recognized as local
+        'Origin': 'http://127.0.0.1:7860',
       }
     });
 
@@ -338,7 +338,7 @@ function handleA2ABridge(req, res) {
           type: 'req', id: 'connect-' + Date.now(), method: 'connect',
           params: {
             auth: { token: GATEWAY_TOKEN },
-            client: { id: 'gateway-client', platform: 'node', mode: 'backend', version: '1.0.0' },
+            client: { id: 'openclaw-control-ui', platform: 'web', mode: 'ui', version: '1.0.0' },
             minProtocol: 3,
             maxProtocol: 3,
           }
