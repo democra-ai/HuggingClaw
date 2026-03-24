@@ -370,16 +370,28 @@ function handleA2ABridge(req, res) {
         return;
       }
 
-      // Step 4: Agent RPC response — "accepted" means async processing started
+      // Step 4: Agent RPC responses — first "accepted", then "final" with summary
       if (msg.type === 'res' && msg.id && msg.id.startsWith('agent-')) {
+        const p = msg.payload || {};
         if (msg.ok) {
-          const p = msg.payload || {};
-          console.log(`[a2a-bridge] Agent accepted: status=${p.status} runId=${p.runId}`);
-          // If status is "accepted", wait for agent/chat events with the actual response
-          if (p.status === 'accepted') return; // Don't finish yet — wait for events
-          // If payload has direct text (unlikely), use it
-          const summary = p.summary || p.text || p.message || '';
-          if (summary) { finish(summary); return; }
+          if (p.status === 'accepted') {
+            console.log(`[a2a-bridge] Agent accepted, waiting for final response...`);
+            return; // Wait for the second response with the actual result
+          }
+          // Final response — extract agent text
+          console.log(`[a2a-bridge] Agent final: status=${p.status} summary=${(p.summary||'').slice(0,200)}`);
+          const text = p.summary || p.text || p.message || '';
+          if (text) agentText = text;
+          // Also try extracting from messages array
+          if (!agentText && p.messages && Array.isArray(p.messages)) {
+            for (const m of p.messages) {
+              if (m.role === 'assistant' && m.content) {
+                agentText = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+                break;
+              }
+            }
+          }
+          finish(agentText || '(completed)');
         } else {
           const errMsg = (msg.error && msg.error.message) || JSON.stringify(msg.error || msg.payload || {}).slice(0, 300);
           console.log(`[a2a-bridge] Agent RPC failed: ${errMsg}`);
