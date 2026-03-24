@@ -409,18 +409,12 @@ function handleA2ABridge(req, res) {
         const pkeys = Object.keys(p).join(',');
         console.log(`[a2a-bridge] Event: ${ev} keys=[${pkeys}] summary=${(p.summary||'').slice(0,100)} status=${p.status||''}`);
 
-        // agent event — main response carrier
+        // agent event — collect text but DON'T finish here.
+        // The final res frame (second response with same ID) has the definitive summary.
         if (ev === 'agent') {
-          // Collect text from various possible fields
           if (p.summary) agentText = p.summary;
           if (p.text) agentText = p.text;
           if (p.message && typeof p.message === 'string') agentText = p.message;
-          // Check for completion
-          if (p.status === 'done' || p.status === 'completed' || p.status === 'ok') {
-            console.log(`[a2a-bridge] Agent done! text=${agentText.slice(0,200)}`);
-            finish(agentText || p.summary || '(completed)');
-            return;
-          }
         }
 
         // chat event — message chunks or full messages
