@@ -468,6 +468,28 @@ class OpenClawFullSync:
 
             if OPENCLAW_DEFAULT_MODEL:
                 data["agents"]["defaults"]["model"]["primary"] = OPENCLAW_DEFAULT_MODEL
+            else:
+                # Clean up stale default model pointing to a provider that doesn't exist.
+                # e.g. openrouter/... when OPENROUTER_API_KEY is not set.
+                current_primary = data.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
+                if current_primary:
+                    provider_prefix = current_primary.split("/")[0] if "/" in current_primary else ""
+                    if provider_prefix:
+                        # Check if this provider has an API key in the environment
+                        provider_key_map = {
+                            "openrouter": "OPENROUTER_API_KEY",
+                            "openai": "OPENAI_API_KEY",
+                            "zhipu": "ZHIPU_API_KEY",
+                            "anthropic": "ANTHROPIC_API_KEY",
+                            "google": "GOOGLE_API_KEY",
+                            "mistral": "MISTRAL_API_KEY",
+                            "cohere": "COHERE_API_KEY",
+                            "nvidia": "NVIDIA_API_KEY",
+                        }
+                        env_key = provider_key_map.get(provider_prefix, "")
+                        if env_key and not os.environ.get(env_key):
+                            print(f"[SYNC] Clearing stale default model '{current_primary}' (no {env_key})")
+                            data["agents"]["defaults"]["model"].pop("primary", None)
 
             # ── ACP (Agent Client Protocol) — native Claude Code integration ──
             data["acp"] = {
