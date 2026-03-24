@@ -523,6 +523,11 @@ http.Server.prototype.emit = function (event, ...args) {
     const pathname = parsed.pathname;
 
     // A2A routes
+    // Debug: log all /a2a requests
+    if (pathname.startsWith('/a2a')) {
+      console.log(`[token-redirect] A2A request: ${req.method} ${pathname} port=${serverPort}`);
+    }
+
     if (pathname.startsWith('/.well-known/')) {
       proxyToA2A(req, res);
       return true;
