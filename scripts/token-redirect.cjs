@@ -409,30 +409,39 @@ function handleA2ABridge(req, res) {
         const pkeys = Object.keys(p).join(',');
         console.log(`[a2a-bridge] Event: ${ev} keys=[${pkeys}] summary=${(p.summary||'').slice(0,100)} status=${p.status||''}`);
 
-        // agent event — collect text but DON'T finish here.
-        // The final res frame (second response with same ID) has the definitive summary.
+        // agent event — collect text from data.text or data.content
+        if (ev === 'agent' && p.data) {
+          const d = typeof p.data === 'object' ? p.data : {};
+          if (d.text) agentText += d.text;
+          if (d.content) agentText += d.content;
+          if (d.delta) agentText += d.delta;
+        }
         if (ev === 'agent') {
           if (p.summary) agentText = p.summary;
           if (p.text) agentText = p.text;
-          if (p.message && typeof p.message === 'string') agentText = p.message;
         }
 
-        // chat event — message chunks or full messages
+        // chat event — message field may be string or object
         if (ev === 'chat') {
-          if (p.message && typeof p.message === 'string') agentText += p.message;
+          if (typeof p.message === 'string') agentText += p.message;
+          else if (p.message && typeof p.message === 'object') {
+            // Structured message: {role, content, ...}
+            const c = p.message.content || p.message.text || '';
+            if (c) agentText += c;
+          }
           if (p.text && typeof p.text === 'string') agentText += p.text;
           if (p.content && typeof p.content === 'string') agentText += p.content;
+          if (p.delta && typeof p.delta === 'string') agentText += p.delta;
         }
 
         // session.message — structured message
-        if (ev === 'session.message') {
-          const content = p.content || p.text || p.message || '';
+        if (ev === 'session.message' && p.role === 'assistant') {
+          const content = p.content || p.text || '';
           if (content && typeof content === 'string') agentText += content;
-          console.log(`[a2a-bridge] session.message: role=${p.role} content=${String(content).slice(0,100)}`);
         }
 
         // Generic delta
-        if (p.delta && typeof p.delta === 'string') agentText += p.delta;
+        if (p.delta && typeof p.delta === 'string' && ev !== 'agent' && ev !== 'chat') agentText += p.delta;
       }
     }
   });
