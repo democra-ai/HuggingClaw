@@ -378,25 +378,49 @@ function handleA2ABridge(req, res) {
             console.log(`[a2a-bridge] Agent accepted, waiting for final response...`);
             return; // Wait for the second response with the actual result
           }
-          // Final response — extract agent text
-          console.log(`[a2a-bridge] Agent final: status=${p.status} summary=${(p.summary||'').slice(0,200)}`);
-          const text = p.summary || p.text || p.message || '';
-          if (text) agentText = text;
-          // Also try extracting from messages array
-          if (!agentText && p.messages && Array.isArray(p.messages)) {
-            for (const m of p.messages) {
-              if (m.role === 'assistant' && m.content) {
-                agentText = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-                break;
-              }
-            }
+          // Final response — extract text or fallback to chat.history
+          console.log(`[a2a-bridge] Agent final: status=${p.status} summary=${(p.summary||'').slice(0,200)} agentText=${agentText.slice(0,100)}`);
+          if (p.summary) agentText = p.summary;
+          if (p.text) agentText = p.text;
+
+          if (agentText) {
+            finish(agentText);
+          } else {
+            // Fallback: fetch latest reply from chat.history (like a2a-gateway does)
+            console.log('[a2a-bridge] No text yet, fetching chat.history...');
+            wsSend(wsSocket, JSON.stringify({
+              type: 'req', id: 'history-' + Date.now(), method: 'chat.history',
+              params: { sessionKey: sessionKey, limit: 5 }
+            }));
+            // Will be handled by the history response handler below
           }
-          finish(agentText || '(completed)');
         } else {
           const errMsg = (msg.error && msg.error.message) || JSON.stringify(msg.error || msg.payload || {}).slice(0, 300);
           console.log(`[a2a-bridge] Agent RPC failed: ${errMsg}`);
           finishError(`Agent dispatch failed: ${errMsg}`);
         }
+        return;
+      }
+
+      // Step 4b: chat.history response — extract latest assistant reply
+      if (msg.type === 'res' && msg.id && msg.id.startsWith('history-')) {
+        if (msg.ok && msg.payload) {
+          const messages = Array.isArray(msg.payload) ? msg.payload :
+                          (msg.payload.messages || msg.payload.history || []);
+          // Find last assistant message
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i];
+            if (m.role === 'assistant' || m.role === 'agent') {
+              const text = m.content || m.text || m.message || '';
+              if (text && typeof text === 'string') {
+                console.log(`[a2a-bridge] Got text from history: ${text.slice(0, 200)}`);
+                finish(text);
+                return;
+              }
+            }
+          }
+        }
+        finish(agentText || '(no reply in history)');
         return;
       }
 
