@@ -1,5 +1,6 @@
-# OpenClaw on Hugging Face Spaces — Pre-built image (v4.1)
+# OpenClaw on Hugging Face Spaces — Pre-built image (v4.2)
 # Uses official pre-built image to avoid 30+ minute builds on cpu-basic
+# Rebuild 2026-03-24: pull OpenClaw 2026.3.23 (fixes operator scope in device-auth bypass)
 
 # ── Stage 1: Pull pre-built OpenClaw ─────────────────────────────────────────
 FROM ghcr.io/openclaw/openclaw:latest AS openclaw-prebuilt
