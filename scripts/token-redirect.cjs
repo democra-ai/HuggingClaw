@@ -529,7 +529,8 @@ http.Server.prototype.emit = function (event, ...args) {
     }
     if (pathname.startsWith('/a2a/')) {
       // POST /a2a/jsonrpc → use bridge (bypasses scope issue)
-      if (req.method === 'POST' && pathname === '/a2a/jsonrpc') {
+      if (req.method === 'POST' && (pathname === '/a2a/jsonrpc' || pathname === '/a2a/jsonrpc/')) {
+        console.log(`[a2a-bridge] Intercepted POST ${pathname}`);
         handleA2ABridge(req, res);
         return true;
       }
