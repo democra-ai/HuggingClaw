@@ -339,6 +339,7 @@ function handleA2ABridge(req, res) {
           params: {
             auth: { token: GATEWAY_TOKEN },
             client: { id: 'openclaw-control-ui', platform: 'web', mode: 'ui', version: '1.0.0' },
+            scopes: ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals', 'operator.pairing'],
             minProtocol: 3,
             maxProtocol: 3,
           }
