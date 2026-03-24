@@ -393,33 +393,39 @@ function handleA2ABridge(req, res) {
         const p = msg.payload || {};
         const ev = msg.event || '';
 
-        // chat event — contains agent message chunks
-        if (ev === 'chat' && p.message) {
-          const m = typeof p.message === 'string' ? p.message : '';
-          if (m) { agentText += m; console.log(`[a2a-bridge] chat chunk: ${m.slice(0,100)}`); }
-        }
+        // Log ALL events for debugging
+        const pkeys = Object.keys(p).join(',');
+        console.log(`[a2a-bridge] Event: ${ev} keys=[${pkeys}] summary=${(p.summary||'').slice(0,100)} status=${p.status||''}`);
 
-        // agent event — contains full response or status updates
+        // agent event — main response carrier
         if (ev === 'agent') {
-          if (p.text) agentText += p.text;
-          if (p.message && typeof p.message === 'string') agentText += p.message;
+          // Collect text from various possible fields
+          if (p.summary) agentText = p.summary;
+          if (p.text) agentText = p.text;
+          if (p.message && typeof p.message === 'string') agentText = p.message;
           // Check for completion
-          if (p.status === 'done' || p.status === 'completed' || p.done) {
-            const summary = p.summary || p.text || '';
-            if (summary && !agentText) agentText = summary;
-            console.log(`[a2a-bridge] Agent done, text len=${agentText.length}`);
-            finish(agentText || '(agent done, no text)');
+          if (p.status === 'done' || p.status === 'completed' || p.status === 'ok') {
+            console.log(`[a2a-bridge] Agent done! text=${agentText.slice(0,200)}`);
+            finish(agentText || p.summary || '(completed)');
             return;
           }
         }
 
-        // session.message event — individual messages
-        if (ev === 'session.message' && p.role === 'assistant') {
-          const content = p.content || p.text || '';
-          if (content) agentText += content;
+        // chat event — message chunks or full messages
+        if (ev === 'chat') {
+          if (p.message && typeof p.message === 'string') agentText += p.message;
+          if (p.text && typeof p.text === 'string') agentText += p.text;
+          if (p.content && typeof p.content === 'string') agentText += p.content;
         }
 
-        // Generic text/delta in any event
+        // session.message — structured message
+        if (ev === 'session.message') {
+          const content = p.content || p.text || p.message || '';
+          if (content && typeof content === 'string') agentText += content;
+          console.log(`[a2a-bridge] session.message: role=${p.role} content=${String(content).slice(0,100)}`);
+        }
+
+        // Generic delta
         if (p.delta && typeof p.delta === 'string') agentText += p.delta;
       }
     }
