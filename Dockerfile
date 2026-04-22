@@ -51,12 +51,11 @@ RUN mkdir -p /home/node/.acpx \
      > /home/node/.acpx/config.json
 
 # ── Prepare runtime dirs ────────────────────────────────────────────────────
-RUN mkdir -p /app/openclaw/empty-bundled-plugins \
-  && node -e "try{console.log(require('/app/openclaw/package.json').version)}catch(e){console.log('unknown')}" > /app/openclaw/.version \
+RUN node -e "try{console.log(require('/app/openclaw/package.json').version)}catch(e){console.log('unknown')}" > /app/openclaw/.version \
   && echo "[build] OpenClaw version: $(cat /app/openclaw/.version)"
 
 # ── Scripts + Config + Frontend ──────────────────────────────────────────────
-ARG CACHE_BUST=2026-03-24-v4
+ARG CACHE_BUST=2026-04-22-speech-core-fix
 RUN echo "Build: ${CACHE_BUST}"
 COPY --chown=node:node scripts /home/node/scripts
 COPY --chown=node:node frontend /home/node/frontend
@@ -68,7 +67,6 @@ RUN chmod +x /home/node/scripts/entrypoint.sh /home/node/scripts/sync_hf.py \
   && echo "[build] Frontend index.html generated (timestamp=${VERSION_TS})"
 
 ENV NODE_ENV=production
-ENV OPENCLAW_BUNDLED_PLUGINS_DIR=/app/openclaw/empty-bundled-plugins
 ENV OPENCLAW_PREFER_PNPM=1
 ENV PATH="/home/node/.local/bin:$PATH"
 WORKDIR /home/node
