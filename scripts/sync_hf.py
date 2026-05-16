@@ -197,8 +197,8 @@ class OpenClawFullSync:
         except Exception:
             if not AUTO_CREATE_DATASET:
                 print(f"[SYNC] Dataset repo NOT found: {HF_REPO_ID}")
-                print(f"[SYNC]   Set AUTO_CREATE_DATASET=true to auto-create.")
-                print(f"[SYNC] Persistence disabled (app will still run normally).")
+                print("[SYNC]   Set AUTO_CREATE_DATASET=true to auto-create.")
+                print("[SYNC] Persistence disabled (app will still run normally).")
                 return False
             print(f"[SYNC] Dataset repo NOT found: {HF_REPO_ID} — creating...")
             try:
@@ -655,11 +655,11 @@ class OpenClawFullSync:
             entry_cmd = ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
         else:
             print(f"[SYNC] ERROR: No entry point found in {APP_DIR}")
-            print(f"[SYNC]   Checked: dist/entry.js, openclaw.mjs")
+            print("[SYNC]   Checked: dist/entry.js, openclaw.mjs")
             # List what's actually there
             try:
                 print(f"[SYNC]   Contents: {list(Path(APP_DIR).iterdir())[:20]}")
-            except: pass
+            except Exception: pass
             return None
 
         # ── Patch OpenClaw scope bug (openclaw/openclaw#17187) ────────
@@ -690,7 +690,7 @@ class OpenClawFullSync:
         if tg_root and tg_root != "https://api.telegram.org":
             env["TELEGRAM_API_ROOT"] = tg_root
             print(f"[TELEGRAM] Set TELEGRAM_API_ROOT={tg_root}")
-            print(f"[TELEGRAM] telegram-proxy.cjs will redirect fetch() calls")
+            print("[TELEGRAM] telegram-proxy.cjs will redirect fetch() calls")
         elif tg_root:
             print("[TELEGRAM] Official API reachable — no proxy needed")
         else:

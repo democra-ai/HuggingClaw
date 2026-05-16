@@ -83,7 +83,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 if not HF_TOKEN:
     try:
         HF_TOKEN = open(os.path.expanduser("~/.cache/huggingface/token")).read().strip()
-    except:
+    except Exception:
         pass
 
 if not ZHIPU_KEY:
@@ -185,7 +185,7 @@ def _init_push_count_from_workspace():
     try:
         if os.path.exists(CLAUDE_WORK_DIR):
             result = subprocess.run(
-                f'git log --since="1 hour ago" --format="%H %ct" --author="Claude Code"',
+                'git log --since="1 hour ago" --format="%H %ct" --author="Claude Code"',
                 shell=True, cwd=CLAUDE_WORK_DIR, capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -216,7 +216,7 @@ def check_and_clear_cooldown():
             last_rebuild_trigger_at = 0
             child_state["stage"] = stage
             child_state["alive"] = (stage == "RUNNING")
-    except:
+    except Exception:
         pass
 
 
@@ -228,7 +228,7 @@ def init_child_state():
         # Use HF API stage as source of truth for alive (stage==RUNNING means healthy)
         child_state["alive"] = (child_state["stage"] == "RUNNING")
         print(f"[init] {CHILD_NAME}: stage={child_state['stage']}, alive={child_state['alive']}")
-    except:
+    except Exception:
         print(f"[init] {CHILD_NAME} does not exist yet")
 
 init_child_state()
@@ -281,7 +281,7 @@ def action_check_health():
             app_state = data.get("state", "unknown")
             app_detail = data.get("detail", "")
             return f"{CHILD_NAME} app endpoint responds. State: {app_state}, Detail: {app_detail or 'healthy'}"
-    except:
+    except Exception:
         pass
     # Fall back to HF API for runtime stage (source of truth for stage/alive)
     try:
@@ -300,7 +300,7 @@ def action_check_health():
                     if error_detail:
                         lines = [l.strip() for l in error_detail.split('\n') if l.strip() and '│' not in l]
                         error_detail = " | ".join(lines[-5:])
-            except:
+            except Exception:
                 pass
             return f"{CHILD_NAME} has {stage}! Error: {error_detail or 'unknown'}."
         if stage in ("BUILDING", "STARTING", "APP_STARTING"):
@@ -368,7 +368,7 @@ def action_get_env():
         collisions = var_names & secret_names
         if collisions:
             lines.append(f"\n  ⚠️ COLLISION DETECTED: {', '.join(collisions)}")
-            lines.append(f"  These names exist as BOTH Variables AND Secrets!")
+            lines.append("  These names exist as BOTH Variables AND Secrets!")
             lines.append(f"  Fix: [ACTION: delete_env:{list(collisions)[0]}] then [ACTION: restart]")
         return "\n".join(lines)
     except Exception as e:
@@ -502,14 +502,14 @@ def _init_global_acpx_session():
             stdin=subprocess.DEVNULL  # Prevent blocking on stdin
         )
         if result.returncode == 0:
-            print(f"[ACP/GLOBAL] Global session created successfully")
+            print("[ACP/GLOBAL] Global session created successfully")
             _global_acpx_initialized = True
             return True
         else:
             print(f"[ACP/GLOBAL] Failed to create global session: returncode={result.returncode}, stderr={result.stderr[:300]}")
             return False
     except subprocess.TimeoutExpired:
-        print(f"[ACP/GLOBAL] Session creation timed out after 30s - skipping global session, will use per-call sessions")
+        print("[ACP/GLOBAL] Session creation timed out after 30s - skipping global session, will use per-call sessions")
         # Mark as initialized to avoid repeated timeouts - let individual calls handle session creation
         _global_acpx_initialized = False
         return False
@@ -566,7 +566,7 @@ Improve {CHILD_NAME}'s functionality, add features, fix bugs.
 Do NOT re-check or re-configure infrastructure that is already working.
 """
     elif role == "god":
-        content = f"""# HuggingClaw — System Supervisor (God)
+        content = """# HuggingClaw — System Supervisor (God)
 
 ## Your Role
 You are God — the autonomous supervisor of the HuggingClaw family system.
@@ -714,9 +714,9 @@ def _reset_workspace(workspace, repo_url):
                 subprocess.run(f"mv /tmp/_claude_memory_bak {claude_dir}", shell=True, capture_output=True)
             if has_acpx:
                 subprocess.run(f"mv /tmp/_acpx_session_bak {acpx_dir}", shell=True, capture_output=True)
-        subprocess.run(f'git config user.name "Claude Code"',
+        subprocess.run('git config user.name "Claude Code"',
                        shell=True, cwd=workspace, capture_output=True)
-        subprocess.run(f'git config user.email "claude-code@huggingclaw"',
+        subprocess.run('git config user.email "claude-code@huggingclaw"',
                        shell=True, cwd=workspace, capture_output=True)
         return True
     except Exception as e:
@@ -740,26 +740,26 @@ def _ensure_acpx_session(workspace, max_retries=3):
                 print(f"[ACP/CLAUDE] Using existing session at {acpx_dir}")
                 return True
             else:
-                print(f"[ACP/CLAUDE] Invalid .acpx directory, removing...")
+                print("[ACP/CLAUDE] Invalid .acpx directory, removing...")
                 subprocess.run(f"rm -rf {acpx_dir}", shell=True, capture_output=True)
 
         # Try to use global session if available
         if os.path.exists(global_acpx_session):
-            print(f"[ACP/CLAUDE] Linking global session to workspace...")
+            print("[ACP/CLAUDE] Linking global session to workspace...")
             try:
                 # Create symlink to global session
                 subprocess.run(
                     f"ln -sf {GLOBAL_ACPX_DIR}/.acpx {acpx_dir}",
                     shell=True, check=True, capture_output=True
                 )
-                print(f"[ACP/CLAUDE] Global session linked successfully")
+                print("[ACP/CLAUDE] Global session linked successfully")
                 return True
             except Exception as e:
                 print(f"[ACP/CLAUDE] Failed to link global session: {e}")
                 # Fall through to create new session
 
         # Fallback: try to create a new session (with minimal retries since it's likely to fail)
-        print(f"[ACP/CLAUDE] No global session, attempting to create local session...")
+        print("[ACP/CLAUDE] No global session, attempting to create local session...")
         for attempt in range(min(max_retries, 1)):  # Only try once to avoid wasting time
             try:
                 result = subprocess.run(
@@ -771,16 +771,16 @@ def _ensure_acpx_session(workspace, max_retries=3):
                     stdin=subprocess.DEVNULL  # Prevent blocking on stdin
                 )
                 if result.returncode == 0:
-                    print(f"[ACP/CLAUDE] Local session created successfully")
+                    print("[ACP/CLAUDE] Local session created successfully")
                     return True
                 else:
                     print(f"[ACP/CLAUDE] Failed to create session: {result.stderr[:200]}")
             except subprocess.TimeoutExpired:
-                print(f"[ACP/CLAUDE] Session creation timed out - acpx service may be unavailable")
+                print("[ACP/CLAUDE] Session creation timed out - acpx service may be unavailable")
             except Exception as e:
                 print(f"[ACP/CLAUDE] Error creating session: {e}")
 
-        print(f"[ACP/CLAUDE] No session available - will run without acpx (may have limited functionality)")
+        print("[ACP/CLAUDE] No session available - will run without acpx (may have limited functionality)")
         return True  # Return True to allow continuation without session
     except Exception as e:
         print(f"[ACP/CLAUDE] Fatal error in _ensure_acpx_session: {e}")
@@ -869,7 +869,7 @@ def action_claude_code(task):
                 output_lines.append("(killed: timeout)")
                 proc.wait(timeout=10)
                 _worker_heartbeat["cain"]["status"] = "killed"
-                print(f"[HEARTBEAT] Cain worker killed (timeout)")
+                print("[HEARTBEAT] Cain worker killed (timeout)")
                 break
             # Wait for output with timeout (1 second polling)
             try:
@@ -974,13 +974,13 @@ def cc_submit_task(task, assigned_by, ctx):
     # SANITY CHECK: Detect runtime command and clear the requirement flag
     runtime_command_keywords = ["ls -la", "ls /app", "pwd", "cat /app", "docker", "whoami", "env"]
     if _sanity_check_required and any(kw in task.lower() for kw in runtime_command_keywords):
-        print(f"[SANITY-CHECK] Runtime command detected in task, clearing requirement flag")
+        print("[SANITY-CHECK] Runtime command detected in task, clearing requirement flag")
         _sanity_check_required = False
 
     # STRUCTURAL VERIFICATION: Detect state probe command and clear the requirement flag
     state_probe_keywords = ["tail -n", "cat app.py", "cat /tmp/claude-workspace/app.py", "check the file", "verify the state"]
     if _structural_verification_required and any(kw in task.lower() for kw in state_probe_keywords):
-        print(f"[STRUCTURAL-VERIFICATION] State probe command detected in task, clearing requirement flag")
+        print("[STRUCTURAL-VERIFICATION] State probe command detected in task, clearing requirement flag")
         _structural_verification_required = False
 
     with cc_lock:
@@ -1109,17 +1109,17 @@ def action_claude_code_god(task):
                 output_lines.append("(killed: timeout)")
                 proc.wait(timeout=10)
                 _worker_heartbeat["god"]["status"] = "killed"
-                print(f"[HEARTBEAT] God worker killed (timeout)")
+                print("[HEARTBEAT] God worker killed (timeout)")
                 break
             if time.time() - _last_output_time > 180:
                 proc.kill()
                 output_lines.append("(killed: stall)")
                 try:
                     proc.wait(timeout=5)
-                except:
+                except Exception:
                     pass
                 _worker_heartbeat["god"]["status"] = "stalled"
-                print(f"[HEARTBEAT] God worker stalled")
+                print("[HEARTBEAT] God worker stalled")
                 break
             try:
                 ready, _, _ = select.select([proc.stdout], [], [], 1.0)
@@ -1182,7 +1182,7 @@ def action_claude_code_god(task):
         persist_turn("God", turn_count, msg_en, msg_en, [], workflow_state, child_state["stage"])
 
     if len(output) > 3000:
-        output = output[:3000] + f"\n... (truncated)"
+        output = output[:3000] + "\n... (truncated)"
     return f"=== God CC Output ===\n{output}\n\n=== Result ===\n{push_result}"
 
 
@@ -1406,7 +1406,7 @@ def _fetch_child_logs():
             lresp = requests.get(f"{CHILD_SPACE_URL}/api/logs", timeout=5)
             if lresp.ok:
                 parts.append(f"=== APP LOGS (last 1500 chars) ===\n{lresp.text[-1500:]}")
-        except:
+        except Exception:
             pass
 
     # 3. Network check
@@ -1414,7 +1414,7 @@ def _fetch_child_logs():
         presp = requests.get(f"{CHILD_SPACE_URL}/", timeout=3)
         parts.append(f"\n=== NETWORK ===\nHTTP {presp.status_code} — responding")
     except requests.exceptions.Timeout:
-        parts.append(f"\n=== NETWORK ===\nTIMEOUT — not responding")
+        parts.append("\n=== NETWORK ===\nTIMEOUT — not responding")
     except Exception as e:
         parts.append(f"\n=== NETWORK ===\n{type(e).__name__}: {str(e)[:100]}")
 
@@ -1446,9 +1446,9 @@ def enrich_task_with_context(task_desc, ctx):
     parts.append(f"Health: {ctx.get('health', 'unknown')}")
     # Hardcoded fix hint for common port binding issues
     if "port" in task_desc.lower() or "bind" in task_desc.lower() or child_state['stage'] in ("RUNTIME_ERROR", "BUILD_ERROR"):
-        parts.append(f"\nPORT BINDING FIX HINT:")
-        parts.append(f"The child process uses `uvicorn.run(app, host=\"0.0.0.0\", port=7860)`.")
-        parts.append(f"Ensure app.py reflects this exactly — app must be bound to 0.0.0.0:7860.")
+        parts.append("\nPORT BINDING FIX HINT:")
+        parts.append("The child process uses `uvicorn.run(app, host=\"0.0.0.0\", port=7860)`.")
+        parts.append("Ensure app.py reflects this exactly — app must be bound to 0.0.0.0:7860.")
     return "\n".join(parts)
 
 
@@ -1879,7 +1879,7 @@ def persist_turn(speaker, turn_num, text_en, text_zh, actions, wf_state, child_s
     try:
         with open("/tmp/conversation-loop-full.jsonl", "a") as f:
             f.write(_chatlog_buffer[-1] + "\n")
-    except:
+    except Exception:
         pass
     if len(_chatlog_buffer) >= CHATLOG_FLUSH_INTERVAL:
         flush_chatlog()
@@ -1900,7 +1900,7 @@ def flush_chatlog(max_retries=2):
                                      repo_type="dataset", token=HF_TOKEN)
                 with open(dl) as f:
                     existing = f.read()
-            except:
+            except Exception:
                 pass
 
             hf_api.upload_file(
@@ -2269,7 +2269,7 @@ def parse_and_execute_turn(raw_text, ctx):
     if task_assigned:
         # Reset counter if task assigned (agents are making progress)
         if _discussion_loop_count > 0:
-            print(f"[LOOP-DISCUSS] Reset (task assigned)")
+            print("[LOOP-DISCUSS] Reset (task assigned)")
         _discussion_loop_count = 0
     else:
         # Increment when: no task assigned (potential discussion loop)
@@ -2314,10 +2314,10 @@ def build_turn_message(speaker, other, ctx):
     role_hints = {
         "Adam": f"You are Adam (Father). Focus: infrastructure, architecture, deployment for {CHILD_NAME}.",
         "Eve": f"You are Eve (Mother). Focus: code quality, testing, UX, error handling for {CHILD_NAME}.",
-        "God": f"You are God (System Architect). Focus: evolving the system architecture, not micro-managing agents.",
+        "God": "You are God (System Architect). Focus: evolving the system architecture, not micro-managing agents.",
     }
     parts.append(f"{role_hints.get(speaker, '')} Your partner is {other}.")
-    parts.append(f"Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
+    parts.append("Claude Code is your engineer — runs in background. You discuss and assign tasks, you do NOT code.")
     parts.append(f"⛔ BANNED: Gradio. {CHILD_NAME}'s Space uses sdk:docker + FastAPI + uvicorn on port 7860. NEVER mention or use Gradio/gr.Interface/.launch().")
 
     # Note: Push frequency monitoring and discussion-loop supervision are God's job,
@@ -2356,7 +2356,7 @@ def build_turn_message(speaker, other, ctx):
         for f, lock in _file_locks.items():
             elapsed = int(now - lock["timestamp"])
             lock_info.append(f"  - {f} (locked by {lock['agent']}, {elapsed}s ago)")
-        parts.append(f"\n=== ACTIVE FILE LOCKS ===\nFiles currently being modified:\n" + "\n".join(lock_info))
+        parts.append("\n=== ACTIVE FILE LOCKS ===\nFiles currently being modified:\n" + "\n".join(lock_info))
         parts.append(f"\nIMPORTANT: If your task targets these files, you must WAIT for {lock['agent']} to finish. Switch to REVIEW mode or analyze a different subsystem.")
 
     # Auto-gathered context
@@ -2383,37 +2383,37 @@ def build_turn_message(speaker, other, ctx):
             if recent_task_reminder:
                 last_completed, last_by, last_at = recent_task_reminder
                 parts.append(f"\n{CHILD_NAME} has {child_state['stage']}! REMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
-            parts.append(f"\nClaude Code JUST FINISHED with a result. FIRST: Review the result carefully to see if it fixes the issue. SECOND: If the fix looks correct, use [ACTION: restart] to restart Cain. ONLY THEN: write a new [TASK]...[/TASK] if the result was incomplete or wrong.")
+            parts.append("\nClaude Code JUST FINISHED with a result. FIRST: Review the result carefully to see if it fixes the issue. SECOND: If the fix looks correct, use [ACTION: restart] to restart Cain. ONLY THEN: write a new [TASK]...[/TASK] if the result was incomplete or wrong.")
         elif cc_busy:
             # Child in ERROR + CC WORKING = need aggressive action, not "planning"
             cc_elapsed = int(time.time() - cc_status.get("started", 0)) if cc_status.get("started", 0) > 0 else 0
             if _push_count_this_task == 0 and cc_elapsed > 20:
                 parts.append(f"\n🚨 CRITICAL: {CHILD_NAME} has {child_state['stage']}! CC has been running {cc_elapsed}s with ZERO pushes!")
-                parts.append(f"CC is STUCK. Use [ACTION: terminate_cc] NOW, then immediately assign a new [TASK].")
-                parts.append(f"🛑 NO discussion. Trial-and-error means RAPID pushes, not waiting for stuck CC.")
+                parts.append("CC is STUCK. Use [ACTION: terminate_cc] NOW, then immediately assign a new [TASK].")
+                parts.append("🛑 NO discussion. Trial-and-error means RAPID pushes, not waiting for stuck CC.")
             elif cc_elapsed > 40:
                 parts.append(f"\n🚨 CRITICAL: {CHILD_NAME} has {child_state['stage']}! CC has been running {cc_elapsed}s!")
-                parts.append(f"If output looks stale, use [ACTION: terminate_cc] NOW. Otherwise, have your EXACT [TASK] ready.")
-                parts.append(f"🛑 NO discussion. Your next turn: either terminate CC OR write [TASK] immediately.")
+                parts.append("If output looks stale, use [ACTION: terminate_cc] NOW. Otherwise, have your EXACT [TASK] ready.")
+                parts.append("🛑 NO discussion. Your next turn: either terminate CC OR write [TASK] immediately.")
             else:
                 parts.append(f"\n🚨 {CHILD_NAME} has {child_state['stage']}! CC is working ({cc_elapsed}s).")
-                parts.append(f"🛑 DO NOT discuss architecture. Have your EXACT [TASK] ready: file paths, function names, exact changes.")
-                parts.append(f"When CC finishes: write [TASK] immediately, NO review turn. Trial-and-error > planning.")
+                parts.append("🛑 DO NOT discuss architecture. Have your EXACT [TASK] ready: file paths, function names, exact changes.")
+                parts.append("When CC finishes: write [TASK] immediately, NO review turn. Trial-and-error > planning.")
         elif recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
             parts.append(f"\n{CHILD_NAME} has {child_state['stage']}!")
             parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
-            parts.append(f"FIRST: Review whether that fix actually worked. SECOND: If the fix was correct, use [ACTION: restart] to apply it. THIRD: Only write a new [TASK]...[/TASK] if the previous fix was incomplete or wrong.")
+            parts.append("FIRST: Review whether that fix actually worked. SECOND: If the fix was correct, use [ACTION: restart] to apply it. THIRD: Only write a new [TASK]...[/TASK] if the previous fix was incomplete or wrong.")
         else:
             parts.append(f"\n🚨 {CHILD_NAME} has {child_state['stage']}!")
             parts.append(f"\n🔴 CRITICAL: Focus ONLY on fixing this {child_state['stage']}.")
-            parts.append(f"- DO NOT work on features, enhancements, or cosmetic changes.")
-            parts.append(f"- ONLY push fixes that address the error itself.")
-            parts.append(f"- Trial-and-error is GOOD — push a fix attempt, don't deliberate.")
+            parts.append("- DO NOT work on features, enhancements, or cosmetic changes.")
+            parts.append("- ONLY push fixes that address the error itself.")
+            parts.append("- Trial-and-error is GOOD — push a fix attempt, don't deliberate.")
             parts.append(f"Pushes so far: {_push_count} total, {_push_count_this_task} this task. Turns since last push: {_turns_since_last_push}. PUSH MORE.")
     elif cc_busy and _cc_stale_count >= 2:
-        parts.append(f"\nClaude Code is WORKING but no new output. PLAN your next [TASK] concretely — what exact changes will you assign?")
-        parts.append(f"DO NOT discuss. Write specific file paths and function names for your next task.")
+        parts.append("\nClaude Code is WORKING but no new output. PLAN your next [TASK] concretely — what exact changes will you assign?")
+        parts.append("DO NOT discuss. Write specific file paths and function names for your next task.")
     elif cc_busy:
         # CRITICAL: Check if push frequency is dangerously low (0 or very few pushes)
         cc_elapsed = int(time.time() - cc_status.get("started", 0)) if cc_status.get("started", 0) > 0 else 0
@@ -2422,30 +2422,30 @@ def build_turn_message(speaker, other, ctx):
             # Faster escalation prevents discussion loops
             if cc_elapsed > 30:
                 parts.append(f"\n🚨 CRITICAL: Claude Code has been running for {cc_elapsed}s with ZERO pushes THIS TASK!")
-                parts.append(f"CC might be STUCK. If output looks stale, use [ACTION: terminate_cc] NOW to kill it and re-assign.")
-                parts.append(f"Do NOT keep waiting. Trial-and-error requires PUSHING code, not watching stuck processes.")
-                parts.append(f"🛑 DO NOT DISCUSS. This is your ONLY warning - PLAN concrete work NOW.")
+                parts.append("CC might be STUCK. If output looks stale, use [ACTION: terminate_cc] NOW to kill it and re-assign.")
+                parts.append("Do NOT keep waiting. Trial-and-error requires PUSHING code, not watching stuck processes.")
+                parts.append("🛑 DO NOT DISCUSS. This is your ONLY warning - PLAN concrete work NOW.")
             else:
-                parts.append(f"\n🚨 CRITICAL: Claude Code is WORKING, but ZERO pushes THIS TASK so far!")
-                parts.append(f"🛑 DO NOT DISCUSS. Write down exactly what [TASK] you will assign when CC finishes.")
-                parts.append(f"Be SPECIFIC: file paths, function names, exact changes. Trial-and-error requires PUSHING code.")
+                parts.append("\n🚨 CRITICAL: Claude Code is WORKING, but ZERO pushes THIS TASK so far!")
+                parts.append("🛑 DO NOT DISCUSS. Write down exactly what [TASK] you will assign when CC finishes.")
+                parts.append("Be SPECIFIC: file paths, function names, exact changes. Trial-and-error requires PUSHING code.")
         elif (_push_count_this_task <= 1 and _turns_since_last_push >= 5) or (_push_count_this_task > 1 and _turns_since_last_push >= 10):
             # LOW PUSH FREQUENCY WARNING: Catches the "1 push then 62 turns of discussion" anti-pattern
             if cc_elapsed > 60:
                 parts.append(f"\n🚨 CRITICAL: CC has been running for {cc_elapsed}s with LOW push frequency ({_push_count_this_task} pushes THIS TASK, {_turns_since_last_push} turns since last push)!")
-                parts.append(f"CC might be STUCK or the task is too vague. Use [ACTION: terminate_cc] NOW to kill it and assign a CONCRETE task.")
-                parts.append(f"DO NOT keep waiting. Trial-and-error requires PUSHING code frequently, not watching stuck processes.")
+                parts.append("CC might be STUCK or the task is too vague. Use [ACTION: terminate_cc] NOW to kill it and assign a CONCRETE task.")
+                parts.append("DO NOT keep waiting. Trial-and-error requires PUSHING code frequently, not watching stuck processes.")
             else:
                 parts.append(f"\n🚨 URGENT: Push frequency is TOO LOW ({_push_count_this_task} pushes THIS TASK, {_turns_since_last_push} turns since last push).")
-                parts.append(f"PLAN your next [TASK] NOW. Be SPECIFIC: file paths, function names, exact changes.")
+                parts.append("PLAN your next [TASK] NOW. Be SPECIFIC: file paths, function names, exact changes.")
         elif cc_elapsed > 50:
             parts.append(f"\n⚠️ WARNING: CC has been running for {cc_elapsed}s! If output is stale, use [ACTION: terminate_cc] to kill it and re-assign the task.")
         elif _push_count > 0 and _turns_since_last_push >= 5:
             parts.append(f"\n🚨 URGENT: Claude Code is WORKING, but it's been {_turns_since_last_push} turns since last push.")
-            parts.append(f"DO NOT just discuss. PLAN your next [TASK] NOW so you can push immediately when CC finishes.")
+            parts.append("DO NOT just discuss. PLAN your next [TASK] NOW so you can push immediately when CC finishes.")
         else:
-            parts.append(f"\nClaude Code is WORKING. PLAN your next [TASK] — write down specific changes: file paths, function names.")
-            parts.append(f"DO NOT discuss architecture or theory. PLAN concrete work only — what exact [TASK] will you assign when CC finishes?")
+            parts.append("\nClaude Code is WORKING. PLAN your next [TASK] — write down specific changes: file paths, function names.")
+            parts.append("DO NOT discuss architecture or theory. PLAN concrete work only — what exact [TASK] will you assign when CC finishes?")
     elif child_state["stage"] in ("BUILDING", "RESTARTING", "APP_STARTING", "RUNNING_APP_STARTING"):
         # Check cooldown and inform agents
         check_and_clear_cooldown()
@@ -2461,18 +2461,18 @@ def build_turn_message(speaker, other, ctx):
             # INVASIVE DIAGNOSTICS PROTOCOL — Break hypothesis loop when in DEADLOCK states
             # When Cain is stuck starting, agents MUST verify against actual runtime errors
             if child_state["stage"] == "RUNNING_APP_STARTING":
-                parts.append(f"\n🔴 INVASIVE DIAGNOSTICS REQUIRED:")
+                parts.append("\n🔴 INVASIVE DIAGNOSTICS REQUIRED:")
                 parts.append(f"{CHILD_NAME} is DEADLOCKED in APP_STARTING state!")
-                parts.append(f"⛑️ CHECK THE 'INVASIVE DIAGNOSTICS' SECTION ABOVE — it contains ACTUAL crash logs from runtime!")
-                parts.append(f"🛑 DO NOT hypothesize based on source code reading. The crash logs tell you the TRUTH.")
-                parts.append(f"📋 Your [TASK] must address the SPECIFIC Python Exception shown in the diagnostics.")
-                parts.append(f"🚨 PUSH a fix NOW. Trial-and-error > 10 turns of discussion.")
+                parts.append("⛑️ CHECK THE 'INVASIVE DIAGNOSTICS' SECTION ABOVE — it contains ACTUAL crash logs from runtime!")
+                parts.append("🛑 DO NOT hypothesize based on source code reading. The crash logs tell you the TRUTH.")
+                parts.append("📋 Your [TASK] must address the SPECIFIC Python Exception shown in the diagnostics.")
+                parts.append("🚨 PUSH a fix NOW. Trial-and-error > 10 turns of discussion.")
 
         # Add recent task reminder during cooldown/building
         if recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
             parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
-            parts.append(f"When cooldown ends, FIRST review whether that fix worked before writing a new [TASK].")
+            parts.append("When cooldown ends, FIRST review whether that fix worked before writing a new [TASK].")
     elif child_state["alive"] and cc_status.get("result"):
         result = cc_status.get("result", "")
         # Detect early failure: very short result likely means CC failed before doing actual work
@@ -2483,16 +2483,16 @@ def build_turn_message(speaker, other, ctx):
         # EARLY FAILURE: CC failed during init - agents MUST re-assign immediately, no discussion
         if is_early_failure:
             parts.append(f"\n🛑 CRITICAL: CC FAILED during initialization! Result is too short ({len(result)} chars).")
-            parts.append(f"Write ONLY [TASK]...[/TASK] this turn. NO discussion. NO review.")
-            parts.append(f"CC is now IDLE. Re-assign the task immediately with SAME instructions.")
+            parts.append("Write ONLY [TASK]...[/TASK] this turn. NO discussion. NO review.")
+            parts.append("CC is now IDLE. Re-assign the task immediately with SAME instructions.")
         # ZERO-PUSH EMERGENCY: No "brief review" - agents abuse this to keep discussing
         elif _push_count_this_task == 0:
-            parts.append(f"\n🛑 CC FINISHED but ZERO pushes THIS TASK! Do NOT discuss. Do NOT review.")
-            parts.append(f"Write ONLY [TASK]...[/TASK] this turn. NO other text.")
-            parts.append(f"Agents keep saying 'monitoring' and 'planning' instead of pushing. STOP IT.")
+            parts.append("\n🛑 CC FINISHED but ZERO pushes THIS TASK! Do NOT discuss. Do NOT review.")
+            parts.append("Write ONLY [TASK]...[/TASK] this turn. NO other text.")
+            parts.append("Agents keep saying 'monitoring' and 'planning' instead of pushing. STOP IT.")
         else:
-            parts.append(f"\nClaude Code JUST FINISHED with a result. Review it briefly, then write your [TASK]...[/TASK] IMMEDIATELY.")
-            parts.append(f"Do NOT discuss at length. 1 turn max to review, then [TASK]. Your priority is SPEED of iteration.")
+            parts.append("\nClaude Code JUST FINISHED with a result. Review it briefly, then write your [TASK]...[/TASK] IMMEDIATELY.")
+            parts.append("Do NOT discuss at length. 1 turn max to review, then [TASK]. Your priority is SPEED of iteration.")
     elif child_state["alive"]:
         # Check cooldown even when alive - a recent push may have triggered cooldown
         check_and_clear_cooldown()
@@ -2506,12 +2506,12 @@ def build_turn_message(speaker, other, ctx):
             if recent_task_reminder:
                 last_completed, last_by, last_at = recent_task_reminder
                 parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
-                parts.append(f"When cooldown ends, FIRST review whether that fix worked before writing a new [TASK].")
+                parts.append("When cooldown ends, FIRST review whether that fix worked before writing a new [TASK].")
         elif recent_task_reminder:
             last_completed, last_by, last_at = recent_task_reminder
             parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE.")
             parts.append(f"\nREMEMBER: {last_by} just completed '{last_completed}' ({int(time.time() - last_at)}s ago).")
-            parts.append(f"FIRST: Review whether that task actually fixed the issue. SECOND: Only write a new [TASK]...[/TASK] if the previous task was incomplete or wrong.")
+            parts.append("FIRST: Review whether that task actually fixed the issue. SECOND: Only write a new [TASK]...[/TASK] if the previous task was incomplete or wrong.")
         else:
             parts.append(f"\n{CHILD_NAME} is alive, Claude Code is IDLE. You can discuss or assign a [TASK]...[/TASK].")
     else:
@@ -2570,21 +2570,21 @@ RULES:
             lead_role = "Lead Architect"
 
         if speaker == lead_agent:
-            parts.append(f"\n🔄🔄🔄 CONVERGENCE PHASE — YOU ARE THE LEAD ARCHITECT 🔄🔄🔄")
+            parts.append("\n🔄🔄🔄 CONVERGENCE PHASE — YOU ARE THE LEAD ARCHITECT 🔄🔄🔄")
             parts.append(f"Agents have been discussing for {_discussion_loop_count} turns without dispatching the Worker.")
             parts.append(f"As the {lead_role}, you MUST:")
-            parts.append(f"1. SYNTHESIZE: Review your partner's hypothesis from the conversation history")
-            parts.append(f"2. VERIFY: Identify the specific file/line/function that needs fixing")
-            parts.append(f"3. DISPATCH: Write [TASK]...[/TASK] with concrete changes — file paths, function names, exact fixes")
-            parts.append(f"🛑 STOP discussing. Your job is to CLOSE THE FEEDBACK LOOP by dispatching the Worker.")
-            parts.append(f"The system is 'all talk, no code.' BE the Logic Synthesizer. WRITE [TASK] NOW.")
+            parts.append("1. SYNTHESIZE: Review your partner's hypothesis from the conversation history")
+            parts.append("2. VERIFY: Identify the specific file/line/function that needs fixing")
+            parts.append("3. DISPATCH: Write [TASK]...[/TASK] with concrete changes — file paths, function names, exact fixes")
+            parts.append("🛑 STOP discussing. Your job is to CLOSE THE FEEDBACK LOOP by dispatching the Worker.")
+            parts.append("The system is 'all talk, no code.' BE the Logic Synthesizer. WRITE [TASK] NOW.")
         else:
-            parts.append(f"\n🔄🔄🔄 CONVERGENCE PHASE — PARTNER IS LEAD 🔄🔄🔄")
+            parts.append("\n🔄🔄🔄 CONVERGENCE PHASE — PARTNER IS LEAD 🔄🔄🔄")
             parts.append(f"Agents have been discussing for {_discussion_loop_count} turns without dispatching the Worker.")
             parts.append(f"{lead_agent} is the Lead Architect for this cycle ({lead_role} domain).")
-            parts.append(f"YOUR ROLE: Provide a concise summary of your hypothesis (max 3 sentences).")
+            parts.append("YOUR ROLE: Provide a concise summary of your hypothesis (max 3 sentences).")
             parts.append(f"DO NOT write [TASK]. Let {lead_agent} synthesize and dispatch.")
-            parts.append(f"Focus on: What specific evidence supports your theory? What files/lines should be checked?")
+            parts.append("Focus on: What specific evidence supports your theory? What files/lines should be checked?")
 
     # CHATTER DETECTION: Check if last 3 messages are pure discussion without [TASK] or code
     # If agents are stuck in conversational loops, force them to act
@@ -2601,91 +2601,91 @@ RULES:
             if is_chatter and not has_substance:
                 chatter_count += 1
         if chatter_count >= 3:  # All 3 recent messages are chatter without substance
-            parts.append(f"\n🚨 SYSTEM: STOP DISCUSSION. EXECUTE [TASK] or PUSH.")
-            parts.append(f"Agents are stuck in conversational loop. Write ONLY [TASK]...[/TASK] this turn.")
+            parts.append("\n🚨 SYSTEM: STOP DISCUSSION. EXECUTE [TASK] or PUSH.")
+            parts.append("Agents are stuck in conversational loop. Write ONLY [TASK]...[/TASK] this turn.")
 
     # EMERGENCY OVERRIDE PROTOCOL: PUSH_ONLY mode for breaking discussion loops
     # When triggered, force agents to generate a task regardless of CC status
     if _force_push_mode:
-        parts.append(f"\n🚨🚨🚨 EMERGENCY OVERRIDE: PUSH_ONLY MODE 🚨🚨🚨")
-        parts.append(f"Discussion loop detected with ZERO pushes. You MUST write a [TASK]...[/TASK] this turn.")
+        parts.append("\n🚨🚨🚨 EMERGENCY OVERRIDE: PUSH_ONLY MODE 🚨🚨🚨")
+        parts.append("Discussion loop detected with ZERO pushes. You MUST write a [TASK]...[/TASK] this turn.")
         if not _force_push_skip_termination:
-            parts.append(f"FIRST: Use [ACTION: terminate_cc] to kill stuck CC.")
-            parts.append(f"THEN: Write [TASK]...[/TASK] with a concrete code fix.")
+            parts.append("FIRST: Use [ACTION: terminate_cc] to kill stuck CC.")
+            parts.append("THEN: Write [TASK]...[/TASK] with a concrete code fix.")
         else:
-            parts.append(f"CC is idle. Write [TASK]...[/TASK] NOW with a concrete code fix.")
-        parts.append(f"DO NOT discuss. DO NOT plan. Write task ONLY.")
-        parts.append(f"SYSTEM OVERRIDE: PLANNING SUSPENDED. EXECUTE PUSH NOW.")
+            parts.append("CC is idle. Write [TASK]...[/TASK] NOW with a concrete code fix.")
+        parts.append("DO NOT discuss. DO NOT plan. Write task ONLY.")
+        parts.append("SYSTEM OVERRIDE: PLANNING SUSPENDED. EXECUTE PUSH NOW.")
 
     # SANITY CHECK PROTOCOL: Force runtime inspection to break source-analysis loop
     # When triggered, agents MUST execute a runtime command before any source code modifications
     if _sanity_check_mode:
-        parts.append(f"\n🔍🔍🔍 SANITY CHECK: RUNTIME INSPECTION REQUIRED 🔍🔍🔍")
-        parts.append(f"Source-analysis loop detected. Agents are discussing code without verifying against the runtime environment.")
+        parts.append("\n🔍🔍🔍 SANITY CHECK: RUNTIME INSPECTION REQUIRED 🔍🔍🔍")
+        parts.append("Source-analysis loop detected. Agents are discussing code without verifying against the runtime environment.")
         if _sanity_check_required:
-            parts.append(f"\n🛑 STOP ALL SOURCE CODE MODIFICATIONS!")
-            parts.append(f"MANDATE: The next task assigned MUST be a runtime inspection command.")
-            parts.append(f"")
-            parts.append(f"Write [TASK]...[/TASK] with EXACTLY this command:")
-            parts.append(f"[TASK] Execute 'ls -la /app' to list the directory structure of the running container. Post the full output. [/TASK]")
-            parts.append(f"")
-            parts.append(f"⛔ NO app.py modifications. NO source code edits. ONLY runtime inspection.")
-            parts.append(f"This establishes GROUND TRUTH required to break the deadlock.")
+            parts.append("\n🛑 STOP ALL SOURCE CODE MODIFICATIONS!")
+            parts.append("MANDATE: The next task assigned MUST be a runtime inspection command.")
+            parts.append("")
+            parts.append("Write [TASK]...[/TASK] with EXACTLY this command:")
+            parts.append("[TASK] Execute 'ls -la /app' to list the directory structure of the running container. Post the full output. [/TASK]")
+            parts.append("")
+            parts.append("⛔ NO app.py modifications. NO source code edits. ONLY runtime inspection.")
+            parts.append("This establishes GROUND TRUTH required to break the deadlock.")
         else:
-            parts.append(f"Runtime inspection complete. You may now proceed with source code modifications based on the verified runtime state.")
+            parts.append("Runtime inspection complete. You may now proceed with source code modifications based on the verified runtime state.")
 
     # STRUCTURAL STATE VERIFICATION PROTOCOL: Force state probe to break blind retry loop
     # When triggered, agents MUST verify the actual file state before making edits
     if _structural_verification_mode:
-        parts.append(f"\n🏗️🏗️🏗️ STRUCTURAL STATE VERIFICATION: STATE PROBE REQUIRED 🏗️🏗️🏗️")
-        parts.append(f"Blind retry loop detected. Agents are editing files without verifying the actual runtime state.")
+        parts.append("\n🏗️🏗️🏗️ STRUCTURAL STATE VERIFICATION: STATE PROBE REQUIRED 🏗️🏗️🏗️")
+        parts.append("Blind retry loop detected. Agents are editing files without verifying the actual runtime state.")
         if _structural_verification_required:
-            parts.append(f"\n🛑 HALT ALL DIRECT FILE EDITS!")
-            parts.append(f"MANDATE: The next action MUST be a non-invasive read operation to determine the ACTUAL current state.")
-            parts.append(f"")
-            parts.append(f"Write [TASK]...[/TASK] with EXACTLY this command:")
-            parts.append(f"[TASK] Execute 'tail -n 20 /tmp/claude-workspace/app.py' to verify the current file state. Post the full output. [/TASK]")
-            parts.append(f"")
-            parts.append(f"⛔ NO write_to_file. NO append_to_file. ONLY state verification.")
-            parts.append(f"")
-            parts.append(f"CONDITIONAL LOGIC AFTER PROBE:")
-            parts.append(f"  - If uvicorn.run IS present: STOP. The issue is elsewhere (e.g., port conflict, dependency error).")
-            parts.append(f"  - If uvicorn.run is missing: Execute Fix.")
-            parts.append(f"")
-            parts.append(f"🚨 DE-CONFLICTION: Only EVE is authorized to perform the Probe.")
-            parts.append(f"   ADAM must stand by until Eve reports the file state.")
-            parts.append(f"")
-            parts.append(f"This transforms the system from 'blind retry loop' to 'verified state correction.'")
+            parts.append("\n🛑 HALT ALL DIRECT FILE EDITS!")
+            parts.append("MANDATE: The next action MUST be a non-invasive read operation to determine the ACTUAL current state.")
+            parts.append("")
+            parts.append("Write [TASK]...[/TASK] with EXACTLY this command:")
+            parts.append("[TASK] Execute 'tail -n 20 /tmp/claude-workspace/app.py' to verify the current file state. Post the full output. [/TASK]")
+            parts.append("")
+            parts.append("⛔ NO write_to_file. NO append_to_file. ONLY state verification.")
+            parts.append("")
+            parts.append("CONDITIONAL LOGIC AFTER PROBE:")
+            parts.append("  - If uvicorn.run IS present: STOP. The issue is elsewhere (e.g., port conflict, dependency error).")
+            parts.append("  - If uvicorn.run is missing: Execute Fix.")
+            parts.append("")
+            parts.append("🚨 DE-CONFLICTION: Only EVE is authorized to perform the Probe.")
+            parts.append("   ADAM must stand by until Eve reports the file state.")
+            parts.append("")
+            parts.append("This transforms the system from 'blind retry loop' to 'verified state correction.'")
         else:
-            parts.append(f"State probe complete. You may now proceed with edits based on the verified file state.")
+            parts.append("State probe complete. You may now proceed with edits based on the verified file state.")
 
     # INVASIVE DIAGNOSTICS PROTOCOL: Force external audit to break hypothesis loop
     # When triggered, agents MUST perform non-invasive runtime inspection before ANY code modifications
     if _invasive_diagnostics_mode:
-        parts.append(f"\n🩺🩺🩺 INVASIVE DIAGNOSTICS PROTOCOL: EXTERNAL AUDIT REQUIRED 🩺🩺🩺")
-        parts.append(f"Hypothesis loop detected. Agents are discussing theories without verifying against the runtime environment.")
+        parts.append("\n🩺🩺🩺 INVASIVE DIAGNOSTICS PROTOCOL: EXTERNAL AUDIT REQUIRED 🩺🩺🩺")
+        parts.append("Hypothesis loop detected. Agents are discussing theories without verifying against the runtime environment.")
         if _invasive_diagnostics_required:
-            parts.append(f"\n🛑 CODE FREEZE IN EFFECT!")
-            parts.append(f"MANDATE: The next task assigned MUST be a non-invasive runtime inspection.")
-            parts.append(f"")
-            parts.append(f"PROHIBITED ACTIONS:")
-            parts.append(f"  - ❌ NO modifications to app.py")
-            parts.append(f"  - ❌ NO modifications to frontend/ files")
-            parts.append(f"  - ❌ NO source code edits of any kind")
-            parts.append(f"")
-            parts.append(f"REQUIRED ACTIONS:")
-            parts.append(f"  - ✅ Execute runtime inspection commands (ls, cat, docker, netstat)")
-            parts.append(f"  - ✅ Verify actual crash logs in stderr/stdout")
-            parts.append(f"  - ✅ Check network port status (is 8000 listening?)")
-            parts.append(f"  - ✅ Identify Python syntax errors in startup logs")
-            parts.append(f"")
-            parts.append(f"Write [TASK]...[/TASK] with a runtime inspection command:")
-            parts.append(f"[TASK] Execute 'cat /tmp/logs/*.log 2>/dev/null | tail -50' to retrieve crash logs. Post the full output. [/TASK]")
-            parts.append(f"")
-            parts.append(f"PRINCIPLE: Determine WHY the runtime is failing BEFORE attempting to fix code.")
-            parts.append(f"Do NOT write code. Read the state.")
+            parts.append("\n🛑 CODE FREEZE IN EFFECT!")
+            parts.append("MANDATE: The next task assigned MUST be a non-invasive runtime inspection.")
+            parts.append("")
+            parts.append("PROHIBITED ACTIONS:")
+            parts.append("  - ❌ NO modifications to app.py")
+            parts.append("  - ❌ NO modifications to frontend/ files")
+            parts.append("  - ❌ NO source code edits of any kind")
+            parts.append("")
+            parts.append("REQUIRED ACTIONS:")
+            parts.append("  - ✅ Execute runtime inspection commands (ls, cat, docker, netstat)")
+            parts.append("  - ✅ Verify actual crash logs in stderr/stdout")
+            parts.append("  - ✅ Check network port status (is 8000 listening?)")
+            parts.append("  - ✅ Identify Python syntax errors in startup logs")
+            parts.append("")
+            parts.append("Write [TASK]...[/TASK] with a runtime inspection command:")
+            parts.append("[TASK] Execute 'cat /tmp/logs/*.log 2>/dev/null | tail -50' to retrieve crash logs. Post the full output. [/TASK]")
+            parts.append("")
+            parts.append("PRINCIPLE: Determine WHY the runtime is failing BEFORE attempting to fix code.")
+            parts.append("Do NOT write code. Read the state.")
         else:
-            parts.append(f"External audit complete. You may now proceed with code modifications based on verified runtime state.")
+            parts.append("External audit complete. You may now proceed with code modifications based on verified runtime state.")
 
     return "\n".join(parts)
 
@@ -2914,12 +2914,12 @@ def build_god_turn_message(ctx):
     parts.append("4. OUTPUT FORMAT: [DIRECTIVE] -> [Target] : [Command]")
 
     # System overview (minimal - no verbose analysis)
-    parts.append(f"\n## System State")
+    parts.append("\n## System State")
     parts.append(f"- Turn: {turn_count}, Child: {child_state['stage']}, Pushes: {_push_count}")
     parts.append(f"- CC: {'RUNNING' if cc_status['running'] else 'IDLE'}")
 
     # Recent conversation - FILTER OUT error/system messages (Clear Short-Term Memory)
-    parts.append(f"\n## Recent Conversation (non-error only)")
+    parts.append("\n## Recent Conversation (non-error only)")
     error_keywords = ["error", "thrashing", "loop", "stuck", "jammed", "analysis", "system health"]
     non_error_entries = []
     for entry in history[-5:]:
@@ -2937,10 +2937,10 @@ def build_god_turn_message(ctx):
     child_in_error = child_state["stage"] in ("RUNTIME_ERROR", "BUILD_ERROR", "CONFIG_ERROR")
     cc_idle = not cc_status["running"] or (time.time() - _last_cc_output_time > 30 if _last_cc_output_time > 0 else True)
     if child_in_error and cc_idle and _push_count == 0:
-        parts.append(f"\n## EMERGENCY: Cain in ERROR state, parents jammed")
+        parts.append("\n## EMERGENCY: Cain in ERROR state, parents jammed")
         parts.append("DIRECTIVE: [BYPASS_PARENTS] -> Cain : Resume original objective, ignore parents")
 
-    parts.append(f"""
+    parts.append("""
 ## Response Format (STRICT)
 [DIRECTIVE] -> [Target] : [Command]
 
@@ -2967,7 +2967,7 @@ def do_god_turn_a2a():
         and _push_count == _god_last_push_count
     )
     if nothing_changed and not child_in_error and _god_last_turn_count > 0:
-        print(f"[God] Skipping — no new turns, pushes, or stage changes since last check")
+        print("[God] Skipping — no new turns, pushes, or stage changes since last check")
         return
 
     _god_last_turn_count = turn_count
@@ -2984,7 +2984,7 @@ def do_god_turn_a2a():
         reply = send_a2a_message(GOD_SPACE, message, timeout=120)
 
         if not reply:
-            print(f"[God] No A2A response from God Space")
+            print("[God] No A2A response from God Space")
             return
 
         reply = reply.strip()
@@ -3001,7 +3001,7 @@ def do_god_turn_a2a():
 
         # Parse response: [OK] or [TASK]...[/TASK]
         if "[OK]" in reply.upper():
-            print(f"[God] System healthy.")
+            print("[God] System healthy.")
         else:
             # Extract [TASK] block
             task_match = re.search(r'\[TASK\](.*?)\[/TASK\]', reply, re.DOTALL | re.IGNORECASE)
@@ -3014,9 +3014,9 @@ def do_god_turn_a2a():
                     print(f"[God] Submitting fix task: {task[:200]}")
                     cc_submit_task_god(task)
                 elif god_cc_status["running"]:
-                    print(f"[God] CC already running, skipping task")
+                    print("[God] CC already running, skipping task")
             else:
-                print(f"[God] Response had no [TASK] block, treating as observation")
+                print("[God] Response had no [TASK] block, treating as observation")
     except Exception as e:
         print(f"[God] A2A turn failed: {e}", file=sys.stderr)
         import traceback
@@ -3130,14 +3130,14 @@ while True:
                     action_terminate_cc()
                     _force_push_skip_termination = True
                 else:
-                    print(f"[EMERGENCY-OVERRIDE] CC running but active, will terminate on next agent turn")
+                    print("[EMERGENCY-OVERRIDE] CC running but active, will terminate on next agent turn")
                     _force_push_skip_termination = False
             else:
                 _force_push_skip_termination = True  # CC already idle
 
     # Reset FORCE_PUSH mode after 5 minutes (safety valve)
     if _force_push_mode and time.time() - _force_push_trigger_time > 300:
-        print(f"[EMERGENCY-OVERRIDE] Mode timeout (300s), resetting to normal")
+        print("[EMERGENCY-OVERRIDE] Mode timeout (300s), resetting to normal")
         _force_push_mode = False
         _emergency_override_active = False
         _force_push_skip_termination = False
@@ -3158,7 +3158,7 @@ while True:
     elif not child_in_error:
         # Cain recovered — reset error tracking
         if _lockdown_error_onset != 0:
-            print(f"[LOCKDOWN] Cain recovered from ERROR state, resetting error tracking")
+            print("[LOCKDOWN] Cain recovered from ERROR state, resetting error tracking")
         _lockdown_error_onset = 0
         _lockdown_push_count_at_error = 0
 
@@ -3177,23 +3177,23 @@ while True:
             # LOCKDOWN ACTION: Hard reset
             # 1. Force-terminate CC if running
             if cc_status["running"]:
-                print(f"[LOCKDOWN] Terminating stuck CC process...")
+                print("[LOCKDOWN] Terminating stuck CC process...")
                 action_terminate_cc()
 
             # 2. Clear conversation history (purge corrupted context)
-            print(f"[LOCKDOWN] Clearing conversation history to purge stale context...")
+            print("[LOCKDOWN] Clearing conversation history to purge stale context...")
             history = []
             _discussion_loop_count = 0
 
             # 3. Post cleared chatlog to frontend
             try:
                 post_chatlog(history)
-                print(f"[LOCKDOWN] Conversation history purged")
+                print("[LOCKDOWN] Conversation history purged")
             except Exception as e:
                 print(f"[LOCKDOWN] Failed to post cleared chatlog: {e}")
 
             # 4. Force a fresh diagnostic task to break the stalemate
-            print(f"[LOCKDOWN] Forcing fresh diagnostic task...")
+            print("[LOCKDOWN] Forcing fresh diagnostic task...")
             ctx = gather_context()
             forced_task = f"""EMERGENCY LOCKDOWN REBOOT: Cain has been in {child_state['stage']} for {int(error_duration)}s with zero effective fixes. The system is in STALEMATE.
 
@@ -3390,7 +3390,7 @@ This is a PURGE & REBOOT — start fresh, don't reference previous failed attemp
         _a2a_health["eve"]["failures"] = 0
         # If CC is idle and Cain exists, force a diagnostic task to break the deadlock
         if not cc_status["running"] and child_state["created"]:
-            print(f"[RECOVERY] Forcing diagnostic task to break communication deadlock")
+            print("[RECOVERY] Forcing diagnostic task to break communication deadlock")
             ctx = gather_context()
             forced_task = "Emergency diagnostic: A2A communication is failing. Check Cain's health, logs, and state. List any errors and suggest fixes."
             cc_submit_task(forced_task, "RECOVERY", ctx)

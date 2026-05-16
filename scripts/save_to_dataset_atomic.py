@@ -226,7 +226,7 @@ class AtomicDatasetSaver:
                     json.dump(metadata, f, indent=2)
                 
                 # Copy source files to state directory
-                operations = [CommitOperationAdd(path_in_repo=f"state/metadata.json", path_or_fileobj=str(metadata_path))]
+                operations = [CommitOperationAdd(path_in_repo="state/metadata.json", path_or_fileobj=str(metadata_path))]
                 
                 for source_path in source_paths:
                     source = Path(source_path)

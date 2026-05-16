@@ -1,0 +1,16 @@
+[tool.ruff]
+# Live HF Spaces deployment without a test suite — keep the gate focused on
+# correctness/safety, not cosmetic churn that would bury debugging diffs.
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# E722 bare-except, F-series pyflakes (unused imports/vars, dead f-strings),
+# B bugbear (real footguns), S-series shell/subprocess safety. Style-only
+# rules (line length spam, print, docstrings, annotations) intentionally off.
+select = ["E722", "F", "B", "S602", "S603", "S110"]
+ignore = ["F401"]
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]

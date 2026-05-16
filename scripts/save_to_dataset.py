@@ -61,7 +61,7 @@ def main() -> None:
     if os.path.exists(creds_path):
         print(f"[save_to_dataset] ✅ WhatsApp credentials found at {creds_path}")
     else:
-        print(f"[save_to_dataset] ⚠️  WhatsApp credentials NOT found (user might need to login)")
+        print("[save_to_dataset] ⚠️  WhatsApp credentials NOT found (user might need to login)")
 
     # Generate timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
